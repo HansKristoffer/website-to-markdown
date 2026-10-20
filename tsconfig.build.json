@@ -6,8 +6,8 @@
 		"emitDeclarationOnly": false,
 		"outDir": "dist",
 		"rootDir": "src",
-		"module": "NodeNext",
-		"moduleResolution": "NodeNext",
+		"module": "ESNext",
+		"moduleResolution": "bundler",
 		"target": "ES2022",
 		"lib": [
 			"ES2022"
@@ -15,7 +15,7 @@
 		"sourceMap": true,
 		"declarationMap": true,
 		"types": [
-			"node"
+			"bun"
 		],
 		"inlineSources": true
 	},

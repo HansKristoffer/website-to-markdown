@@ -5,25 +5,77 @@
 	"type": "module",
 	"license": "MIT",
 	"sideEffects": false,
-	"repository": { "type": "git", "url": "git+https://github.com/HansKristoffer/website-to-markdown.git" },
-	"engines": { "node": ">=20" },
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/HansKristoffer/website-to-markdown.git"
+	},
+	"homepage": "https://github.com/HansKristoffer/website-to-markdown#readme",
+	"keywords": [
+		"markdown",
+		"html-to-markdown",
+		"cloudflare",
+		"workers-ai",
+		"browser-rendering",
+		"sitemap",
+		"robots.txt",
+		"crawler"
+	],
+	"engines": {
+		"bun": ">=1.2.0"
+	},
 	"exports": {
-		".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" }
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		},
+		"./sitemap": {
+			"types": "./dist/sitemap/index.d.ts",
+			"import": "./dist/sitemap/index.js"
+		}
+	},
+	"bin": {
+		"website-to-markdown": "./dist/cli.js"
 	},
 	"types": "./dist/index.d.ts",
-	"files": ["dist", "LICENSE", "README.md", "src/**/*.ts", "!src/**/*.test.ts"],
-	"publishConfig": { "access": "public" },
+	"files": [
+		"dist",
+		"LICENSE",
+		"README.md",
+		"src/**/*.ts",
+		"!src/**/*.test.ts"
+	],
+	"publishConfig": {
+		"access": "public"
+	},
 	"scripts": {
 		"build": "bun scripts/build.ts",
 		"test": "bun test",
 		"typecheck": "tsc --noEmit",
 		"lint": "bun run typecheck && biome check",
-		"lint:write": "bun run typecheck && biome check --write"
+		"lint:write": "bun run typecheck && biome check --write",
+		"attw": "attw --pack . --profile esm-only",
+		"publint": "publint",
+		"verify:package": "node scripts/verify-package.mjs"
+	},
+	"dependencies": {
+		"cloudflare": "^5.2.0",
+		"fflate": "^0.8.2"
+	},
+	"peerDependencies": {
+		"hanzio": "^3.0.0",
+		"zod": "^4.0.0"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.2.4",
 		"@types/bun": "^1.2.0",
-		"typescript": "^5.9.2"
+		"typescript": "^5.9.2",
+		"@arethetypeswrong/cli": "^0.18.2",
+		"hanzio": "^3.0.0",
+		"publint": "^0.3.12",
+		"zod": "^4.4.3"
+	},
+	"bugs": {
+		"url": "https://github.com/HansKristoffer/website-to-markdown/issues"
 	},
 	"packageManager": "bun@1.4.2"
 }
