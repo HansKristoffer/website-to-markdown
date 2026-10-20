@@ -1,0 +1,29 @@
+{
+	"name": "website-to-markdown",
+	"version": "0.0.0",
+	"description": "Turn URLs, HTML and files into markdown, with sitemap discovery and per-host limits.",
+	"type": "module",
+	"license": "MIT",
+	"sideEffects": false,
+	"repository": { "type": "git", "url": "git+https://github.com/HansKristoffer/website-to-markdown.git" },
+	"engines": { "node": ">=20" },
+	"exports": {
+		".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" }
+	},
+	"types": "./dist/index.d.ts",
+	"files": ["dist", "LICENSE", "README.md", "src/**/*.ts", "!src/**/*.test.ts"],
+	"publishConfig": { "access": "public" },
+	"scripts": {
+		"build": "bun scripts/build.ts",
+		"test": "bun test",
+		"typecheck": "tsc --noEmit",
+		"lint": "bun run typecheck && biome check",
+		"lint:write": "bun run typecheck && biome check --write"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.2.4",
+		"@types/bun": "^1.2.0",
+		"typescript": "^5.9.2"
+	},
+	"packageManager": "bun@1.4.2"
+}
