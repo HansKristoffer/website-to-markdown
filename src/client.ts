@@ -48,21 +48,21 @@ export type ConvertFileInput = {
  * `withCloudflareRateLimitRetry` so a 429 releases the slot and trips the
  * shared cooldown before the next try.
  */
-export function createCloudflareClient(input: {
+export function createCloudflareClient(options: {
 	credentials: CloudflareCredentials
 	createLimit: CreateConcurrencyLimit
 	/** Every Workers AI client error except a 429, which is retried instead. */
 	onApiError?: ((error: ApiError) => void) | undefined
 	logger: Logger
 }) {
-	const { credentials, logger } = input
-	const limits = createCloudflareLimits(input.createLimit)
+	const { credentials, logger } = options
+	const limits = createCloudflareLimits(options.createLimit)
 
 	function reportUnlessRateLimited(error: ApiError) {
 		// Expected transient throttles: we retry and trip the shared cooldown.
 		// Reporting every 429 floods the error tracker without adding signal.
 		if (error instanceof HttpResponseError && error.status === 429) return
-		input.onApiError?.(error)
+		options.onApiError?.(error)
 	}
 
 	let cloudflareSdk: Cloudflare | undefined
@@ -217,5 +217,3 @@ export function createCloudflareClient(input: {
 		renderUrlToMarkdown
 	}
 }
-
-export type CloudflareClient = ReturnType<typeof createCloudflareClient>

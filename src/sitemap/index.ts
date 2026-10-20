@@ -19,21 +19,20 @@ const ENTRY_LOC_RE = /<loc>\s*([^<]+?)\s*<\/loc>/i
 const LASTMOD_RE = /<lastmod>\s*([^<]+?)\s*<\/lastmod>/i
 const ROBOTS_SITEMAP_RE = /^[^\S\r\n]*sitemap[^\S\r\n]*:[^\S\r\n]*(\S+)/gim
 
-const XML_ENTITIES = {
-	'&amp;': '&',
-	'&lt;': '<',
-	'&gt;': '>',
-	'&quot;': '"',
-	'&apos;': "'",
-	'&#39;': "'"
-} as const satisfies Record<string, string>
+const XML_ENTITIES = new Map([
+	['&amp;', '&'],
+	['&lt;', '<'],
+	['&gt;', '>'],
+	['&quot;', '"'],
+	['&apos;', "'"],
+	['&#39;', "'"]
+])
 
 /** One pass, so `&amp;lt;` decodes to `&lt;` and not to `<`. */
 function decodeXmlEntities(value: string) {
-	return value.replace(/&(?:amp|lt|gt|quot|apos|#39);/g, (entity) =>
-		entity in XML_ENTITIES
-			? XML_ENTITIES[entity as keyof typeof XML_ENTITIES]
-			: entity
+	return value.replace(
+		/&(?:amp|lt|gt|quot|apos|#39);/g,
+		(entity) => XML_ENTITIES.get(entity) ?? entity
 	)
 }
 

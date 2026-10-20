@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test'
 import {
-	type ConcurrencyLimitOptions,
 	createHostLimits,
 	URL_TO_MARKDOWN_HOST_LIMIT_CACHE_MAX,
 	URL_TO_MARKDOWN_HOST_MAX_CONCURRENCY,
@@ -43,7 +42,7 @@ describe('per-host limiters', () => {
 	test('a fleet of hostnames shares one metric label and drops evicted limiters', async () => {
 		const labels = new Set<string | undefined>()
 		let live = 0
-		const pool = createHostLimits((options: ConcurrencyLimitOptions) => {
+		const pool = createHostLimits((options) => {
 			labels.add(options.metricLabel)
 			live++
 			const limit = createMemoryConcurrencyLimit(options)

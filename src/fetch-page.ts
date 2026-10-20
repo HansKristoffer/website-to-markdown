@@ -472,7 +472,7 @@ export type WebsiteToMarkdownOptions = {
 	 */
 	createLimit?: CreateConcurrencyLimit
 	/** Workers AI client errors other than 429s, for an error tracker. */
-	onApiError?: ((error: ApiError) => void) | undefined
+	onApiError?: (error: ApiError) => void
 	logger?: Logger
 	/** The OCR tier for a PDF Workers AI returned nothing for. */
 	parsePdf?: PdfParser

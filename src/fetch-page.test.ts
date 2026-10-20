@@ -4,9 +4,11 @@ import type { ConvertFileInput } from './client.js'
 import type { PdfParser } from './fetch-page.js'
 import { CloudflareRateLimitedError } from './rate-limit-retry.js'
 
-const convertHtmlWithWorkersAi = mock(async () => null as string | null)
-const convertFileWithWorkersAi = mock(async () => null as string | null)
-const renderUrlToMarkdown = mock(async () => null as string | null)
+type Tier<Input> = (input: Input) => Promise<string | null>
+
+const convertHtmlWithWorkersAi = mock<Tier<{ html: string }>>(async () => null)
+const convertFileWithWorkersAi = mock<Tier<ConvertFileInput>>(async () => null)
+const renderUrlToMarkdown = mock<Tier<string>>(async () => null)
 const parsePdf = mock<PdfParser>(async () => {
 	throw new Error('PDF extraction unavailable')
 })
@@ -32,15 +34,6 @@ function converter() {
 		parsePdf,
 		isHostAllowed
 	})
-}
-
-/** The `argIndex`th argument of a mock's `callIndex`th call. */
-function mockCallArg<T>(
-	fn: { mock: { calls: unknown[][] } },
-	callIndex = 0,
-	argIndex = 0
-) {
-	return fn.mock.calls[callIndex]?.[argIndex] as T
 }
 
 const originalFetch = globalThis.fetch
@@ -413,17 +406,13 @@ describe('fetchPageAsMarkdown', () => {
 
 		await fetchPageAsMarkdown({ url: 'https://shop.example/products/goodday' })
 
-		const converted = mockCallArg<{ html: string }>(
-			convertHtmlWithWorkersAi,
-			0,
-			0
-		)
-		expect(converted.html).toContain('Pink Grapefruit 195 DKK')
-		expect(converted.html).toContain('Choose your country')
-		expect(converted.html).not.toContain('Your cart is empty')
-		expect(converted.html).not.toContain('Kommentar')
-		expect(converted.html).not.toContain('<label>Url</label>')
-		expect(converted.html).toContain('Svar: vi åbner kl. 9.')
+		const converted = convertHtmlWithWorkersAi.mock.calls[0]?.[0].html ?? ''
+		expect(converted).toContain('Pink Grapefruit 195 DKK')
+		expect(converted).toContain('Choose your country')
+		expect(converted).not.toContain('Your cart is empty')
+		expect(converted).not.toContain('Kommentar')
+		expect(converted).not.toContain('<label>Url</label>')
+		expect(converted).toContain('Svar: vi åbner kl. 9.')
 	})
 
 	test('HTML identical to the last read is unchanged and not converted again', async () => {
@@ -573,11 +562,10 @@ describe('fetchPageAsMarkdown', () => {
 		expect(page.outcome).toBe('ok')
 		expect(page.source).toBe('workers-ai')
 		expect(page.title).toBe('Handelsbetingelser')
-		expect(
-			mockCallArg<{ filename: string; mimeType: string }>(
-				convertFileWithWorkersAi
-			)
-		).toMatchObject({ filename: 'vilkaar.pdf', mimeType: 'application/pdf' })
+		expect(convertFileWithWorkersAi.mock.calls[0]?.[0]).toMatchObject({
+			filename: 'vilkaar.pdf',
+			mimeType: 'application/pdf'
+		})
 		expect(renderUrlToMarkdown).not.toHaveBeenCalled()
 	})
 
@@ -607,8 +595,8 @@ describe('fetchPageAsMarkdown', () => {
 
 		expect(page.outcome).toBe('ok')
 		expect(page.markdown).toContain('| Delivery | 0 |')
-		const request = mockCallArg<ConvertFileInput>(convertFileWithWorkersAi)
-		if (typeof request.body === 'string')
+		const request = convertFileWithWorkersAi.mock.calls[0]?.[0]
+		if (!request || typeof request.body === 'string')
 			throw new Error('Spreadsheet conversion must receive workbook bytes')
 		const sheet = unzipSync(new Uint8Array(request.body))[
 			'xl/worksheets/sheet1.xml'

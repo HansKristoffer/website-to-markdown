@@ -205,5 +205,3 @@ export function createHostLimits(
 		}
 	}
 }
-
-export type HostLimits = ReturnType<typeof createHostLimits>
