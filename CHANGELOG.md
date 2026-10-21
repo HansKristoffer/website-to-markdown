@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/HansKristoffer/website-to-markdown/compare/v1.1.0...v1.1.1) (2026-10-21)
+
+
+### Bug Fixes
+
+* **cli:** ignore unknown flags and extra positionals again ([#7](https://github.com/HansKristoffer/website-to-markdown/issues/7)) ([3e4a0de](https://github.com/HansKristoffer/website-to-markdown/commit/3e4a0de6db594b390e410ef3307d75f668bf9b54))
+
 ## [1.1.0](https://github.com/HansKristoffer/website-to-markdown/compare/v1.0.1...v1.1.0) (2026-10-21)
 
 
