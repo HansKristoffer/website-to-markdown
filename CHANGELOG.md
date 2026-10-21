@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/HansKristoffer/website-to-markdown/compare/v1.0.1...v1.1.0) (2026-10-21)
+
+
+### Features
+
+* remove hellu's website-to-markdown re-wraps ([#5](https://github.com/HansKristoffer/website-to-markdown/issues/5)) ([e2bf520](https://github.com/HansKristoffer/website-to-markdown/commit/e2bf52020ae030f6393cdeceb56d8a0f69cb9389))
+
 ## [1.0.1](https://github.com/HansKristoffer/website-to-markdown/compare/v1.0.0...v1.0.1) (2026-10-21)
 
 
