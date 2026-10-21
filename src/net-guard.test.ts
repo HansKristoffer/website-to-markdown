@@ -1,4 +1,5 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, mock, test } from 'bun:test'
+import { createWebsiteToMarkdown } from './fetch-page.js'
 import { isBlockedAddress, isLocalhostHostname } from './net-guard.js'
 
 describe('isBlockedAddress', () => {
@@ -71,5 +72,30 @@ describe('isLocalhostHostname', () => {
 		expect(isLocalhostHostname('127.0.0.1')).toBe(true)
 		expect(isLocalhostHostname('[::1]')).toBe(true)
 		expect(isLocalhostHostname('khtf.dk')).toBe(false)
+	})
+})
+
+describe('createWebsiteToMarkdown isHostAllowed', () => {
+	test('is the guard the converter runs, bound to its logger', async () => {
+		const warn = mock(() => {})
+		const { isHostAllowed } = createWebsiteToMarkdown({
+			cloudflare: { apiToken: 'token', accountId: 'account' },
+			logger: { info() {}, warn }
+		})
+
+		expect(await isHostAllowed('127.0.0.2')).toBe(false)
+		expect(warn).toHaveBeenCalledWith('net-guard.blocked_address', {
+			hostname: '127.0.0.2',
+			addresses: '127.0.0.2'
+		})
+	})
+
+	test('is the isHostAllowed option when one is given', () => {
+		const guard = async () => true
+		const converter = createWebsiteToMarkdown({
+			cloudflare: { apiToken: 'token', accountId: 'account' },
+			isHostAllowed: guard
+		})
+		expect(converter.isHostAllowed).toBe(guard)
 	})
 })

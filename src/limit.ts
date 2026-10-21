@@ -1,8 +1,9 @@
 import { createMemoryConcurrencyLimit } from './memory-limit.js'
 
 /**
- * A semaphore: at most `max` callbacks in flight. hellu's Redis Lua limiter
- * (`createRedisConcurrencyLimit`) fits this shape as is; the default is
+ * A semaphore: at most `max` callbacks in flight. `hanzio/redis`'s
+ * `createRedisConcurrencyLimit` returns this shape (plus `queueDepth`, which is
+ * not needed here) once `send` is bound; the default is
  * {@link createMemoryConcurrencyLimit}.
  */
 export type ConcurrencyLimit = {

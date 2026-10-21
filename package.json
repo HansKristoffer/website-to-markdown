@@ -31,6 +31,10 @@
 		"./sitemap": {
 			"types": "./dist/sitemap/index.d.ts",
 			"import": "./dist/sitemap/index.js"
+		},
+		"./schema": {
+			"types": "./dist/schema/index.d.ts",
+			"import": "./dist/schema/index.js"
 		}
 	},
 	"bin": {
@@ -69,6 +73,7 @@
 		"@arethetypeswrong/cli": "^0.18.2",
 		"@biomejs/biome": "^2.2.4",
 		"@types/bun": "^1.2.0",
+		"@types/node": "^24",
 		"hanzio": "^3.1.0",
 		"publint": "^0.3.12",
 		"typescript": "^5.9.2",

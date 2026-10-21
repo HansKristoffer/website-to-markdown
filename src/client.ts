@@ -1,9 +1,5 @@
 import Cloudflare from 'cloudflare'
-import {
-	type ApiError,
-	createApiClient,
-	HttpResponseError
-} from 'hanzio/api-wrapper'
+import { type ApiError, createApiClient } from 'hanzio/api-wrapper'
 import {
 	type ConcurrencyLimit,
 	type CreateConcurrencyLimit,
@@ -14,6 +10,7 @@ import {
 	CloudflareRateLimitedError,
 	withCloudflareRateLimitRetry
 } from './rate-limit-retry.js'
+import { isReportableApiError } from './report-api-error.js'
 import { rateLimitFromError } from './retry-after.js'
 import { toMarkdown } from './to-markdown.js'
 import { BROWSER_USER_AGENT } from './user-agent.js'
@@ -53,16 +50,17 @@ export function createCloudflareClient(options: {
 	createLimit: CreateConcurrencyLimit
 	/** Every Workers AI client error except a 429, which is retried instead. */
 	onApiError?: ((error: ApiError) => void) | undefined
+	/** Pass timeouts to `onApiError`; default true. */
+	reportTimeouts?: boolean | undefined
 	logger: Logger
 }) {
 	const { credentials, logger } = options
 	const limits = createCloudflareLimits(options.createLimit)
 
-	function reportUnlessRateLimited(error: ApiError) {
-		// Expected transient throttles: we retry and trip the shared cooldown.
-		// Reporting every 429 floods the error tracker without adding signal.
-		if (error instanceof HttpResponseError && error.status === 429) return
-		options.onApiError?.(error)
+	function report(error: ApiError) {
+		if (isReportableApiError(error, options.reportTimeouts)) {
+			options.onApiError?.(error)
+		}
 	}
 
 	let cloudflareSdk: Cloudflare | undefined
@@ -79,7 +77,7 @@ export function createCloudflareClient(options: {
 			},
 			timeoutMs: 30_000,
 			retries: 0,
-			onError: reportUnlessRateLimited,
+			onError: report,
 			endpoints: {
 				toMarkdown
 			}

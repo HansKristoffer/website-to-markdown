@@ -95,3 +95,42 @@ describe('crawl snapshot', () => {
 		).toThrow()
 	})
 })
+
+describe('createWebsiteToMarkdown crawlSnapshot', () => {
+	test('the bound withCrawlSnapshot records under root and logs misses', async () => {
+		const warn = mock(() => {})
+		const converter = createWebsiteToMarkdown({
+			cloudflare: { apiToken: 'token', accountId: 'account' },
+			logger: { info() {}, warn },
+			crawlSnapshot: { root }
+		})
+		const bound = `bound-${process.pid}/example.test`
+		const read = mock(async () => 'live')
+
+		await converter.withCrawlSnapshot({ mode: 'replay', name: bound }, () =>
+			throughCrawlSnapshot('text bound', read)
+		)
+		const replayed = await withCrawlSnapshot(
+			{ mode: 'replay', name: bound },
+			() => throughCrawlSnapshot('text bound', async () => 'again')
+		)
+
+		expect(replayed).toBe('live')
+		expect(warn).toHaveBeenCalledWith('crawl-snapshot.miss', {
+			key: 'text bound'
+		})
+	})
+
+	test('without crawlSnapshot it runs plain jobs and refuses snapshots', async () => {
+		expect(await runWithoutSnapshotRoot(null)).toBe('ran')
+		expect(() => runWithoutSnapshotRoot({ mode: 'record', name })).toThrow(
+			'crawlSnapshot.root'
+		)
+	})
+})
+
+function runWithoutSnapshotRoot(input: CrawlSnapshotInput | null) {
+	return createWebsiteToMarkdown({
+		cloudflare: { apiToken: 'token', accountId: 'account' }
+	}).withCrawlSnapshot(input, async () => 'ran')
+}

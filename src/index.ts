@@ -11,6 +11,7 @@ export {
 export {
 	CRAWL_SNAPSHOT_NAME_PATTERN,
 	type CrawlSnapshotInput,
+	type CrawlSnapshotOptions,
 	currentCrawlSnapshot,
 	throughCrawlSnapshot,
 	withCrawlSnapshot

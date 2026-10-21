@@ -3,6 +3,12 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { sha256Hex } from './hash.js'
 import type { Logger } from './logger.js'
+import {
+	CRAWL_SNAPSHOT_NAME_PATTERN,
+	type CrawlSnapshotInput
+} from './schema/index.js'
+
+export { CRAWL_SNAPSHOT_NAME_PATTERN, type CrawlSnapshotInput }
 
 /**
  * A crawl recorded once and replayed, for benchmarks. Two runs of a pipeline
@@ -19,19 +25,16 @@ import type { Logger } from './logger.js'
  * other tenants' jobs on the same lane. Never in production.
  */
 
-export type CrawlSnapshotInput = {
-	mode: 'record' | 'replay'
-	/** `<snapshot>/<host>`: the bench's snapshot label, then the site. */
-	name: string
-}
-
-/** The name becomes a path, so it may not climb out of `root`. */
-export const CRAWL_SNAPSHOT_NAME_PATTERN =
-	/^[a-z0-9._-]{1,80}\/[a-z0-9._-]{1,120}$/
-
 type CrawlSnapshot = CrawlSnapshotInput & {
 	directory: string
 	logger: Logger | undefined
+}
+
+export type CrawlSnapshotOptions = {
+	/** Directory the snapshots live under. */
+	root: string
+	/** Told about replay misses. */
+	logger?: Logger | undefined
 }
 
 const snapshot = new AsyncLocalStorage<CrawlSnapshot>()
@@ -39,12 +42,7 @@ const snapshot = new AsyncLocalStorage<CrawlSnapshot>()
 export function withCrawlSnapshot<T>(
 	input: CrawlSnapshotInput | null | undefined,
 	run: () => Promise<T>,
-	options: {
-		/** Directory the snapshots live under. */
-		root: string
-		/** Told about replay misses. */
-		logger?: Logger
-	}
+	options: CrawlSnapshotOptions
 ) {
 	if (!input) return run()
 	if (process.env.NODE_ENV === 'production') {

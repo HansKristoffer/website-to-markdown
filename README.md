@@ -40,9 +40,18 @@ per-host limits.
 | `cloudflare` | required | `{ apiToken, accountId }` |
 | `createLimit` | `createMemoryConcurrencyLimit` | Builds every pool. Pass a shared (Redis) limiter when several processes share the Cloudflare quota. |
 | `onApiError` | none | Workers AI client errors (hanzio `ApiError`) other than 429s. |
+| `reportTimeouts` | `true` | `false` keeps Workers AI timeouts from `onApiError`; the page falls through to the next tier anyway. |
 | `logger` | silent | `{ info, warn }` |
 | `parsePdf` | none | OCR tier for a PDF Workers AI returned nothing for. |
 | `isHostAllowed` | public addresses only | SSRF guard run before every origin request. |
+| `crawlSnapshot` | none | `{ root, logger? }` for the returned `withCrawlSnapshot`. |
+
+Besides the converters, the factory returns:
+
+- `isHostAllowed(hostname)`: the SSRF guard the converter runs, bound to its
+  `logger`. Use it for any other fetch of a customer-supplied URL.
+- `withCrawlSnapshot(input, run)`: [crawl snapshots](#crawl-snapshots) under
+  `crawlSnapshot.root`. A `null` input just runs `run`.
 
 A limiter is a function `run => Promise` with `tripCooldown(ms)` and
 `dispose()`:
@@ -50,6 +59,25 @@ A limiter is a function `run => Promise` with `tripCooldown(ms)` and
 ```ts
 import type { CreateConcurrencyLimit } from 'website-to-markdown'
 ```
+
+`hanzio/redis` has one that shares the pools across processes; bind its
+`send`:
+
+```ts
+import { createRedisConcurrencyLimit } from 'hanzio/redis'
+
+const converter = createWebsiteToMarkdown({
+	cloudflare,
+	createLimit: (options) =>
+		createRedisConcurrencyLimit({
+			...options,
+			send: (command, args) => redis.send(command, args)
+		})
+})
+```
+
+`options.metricLabel` names the pool a per-host limiter belongs to; report
+metrics under it rather than under `key`, which is one per customer host.
 
 ### Cancellation
 
@@ -60,7 +88,20 @@ in a job inherits it.
 
 `withCrawlSnapshot({ mode: 'record' | 'replay', name: 'label/host' }, run, { root })`
 records every page and sitemap read under `root` and replays them, so two
-benchmark runs read the same site. Never in production.
+benchmark runs read the same site. Never in production. Pass
+`crawlSnapshot: { root }` to the factory to get it bound as
+`converter.withCrawlSnapshot(input, run)`.
+
+A shared schema can check a name without importing the runtime:
+
+```ts
+import { CRAWL_SNAPSHOT_NAME_PATTERN } from 'website-to-markdown/schema'
+
+const CrawlSnapshotInput = z.object({
+	mode: z.enum(['record', 'replay']),
+	name: z.string().regex(CRAWL_SNAPSHOT_NAME_PATTERN)
+})
+```
 
 ## Sitemaps
 
@@ -76,4 +117,15 @@ const readable = pages.filter((page) => robotsAllows(robots.rules, page.url))
 
 ```sh
 CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=… bunx website-to-markdown https://example.com [--no-render]
+```
+
+`--env-file <path>` reads the two variables from a dotenv file instead; a
+variable already in the environment wins. With a secrets manager, export to a
+file or run the CLI under it:
+
+```sh
+infisical export --format=dotenv > .env.cloudflare
+bunx website-to-markdown https://example.com --env-file .env.cloudflare
+
+infisical run -- bunx website-to-markdown https://example.com
 ```
