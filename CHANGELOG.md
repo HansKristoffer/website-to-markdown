@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/HansKristoffer/website-to-markdown/compare/v1.0.0...v1.0.1) (2026-10-21)
+
+
+### Miscellaneous Chores
+
+* release 1.0.1 ([14c6730](https://github.com/HansKristoffer/website-to-markdown/commit/14c6730ed6d0e2be376aa508ff0acd0806c42125))
+
 ## 1.0.0 (2026-10-20)
 
 
