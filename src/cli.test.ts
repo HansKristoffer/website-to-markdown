@@ -1,4 +1,7 @@
 import { afterAll, expect, test } from 'bun:test'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { main } from './cli.js'
 
 const server = Bun.serve({
@@ -8,7 +11,11 @@ const server = Bun.serve({
 			headers: { 'content-type': 'text/markdown; charset=utf-8' }
 		})
 })
-afterAll(() => server.stop(true))
+const directory = await mkdtemp(join(tmpdir(), 'website-to-markdown-cli-'))
+afterAll(async () => {
+	server.stop(true)
+	await rm(directory, { recursive: true, force: true })
+})
 
 const env = { CLOUDFLARE_API_TOKEN: 'token', CLOUDFLARE_ACCOUNT_ID: 'account' }
 
@@ -31,8 +38,9 @@ Arguments:
   <url>  e.g. https://example.com/about
 
 Options:
-  --[no-]render  Use the Browser Rendering tier; --no-render keeps to HTML tiers. (default: true)
-  -h, --help     Show help
+  --[no-]render        Use the Browser Rendering tier; --no-render keeps to HTML tiers. (default: true)
+  --env-file <string>  Read CLOUDFLARE_* from a dotenv file; the environment wins.
+  -h, --help           Show help
 `
 
 test('help', async () => {
@@ -81,4 +89,33 @@ test('missing Cloudflare credentials exit 1', async () => {
 		stdout: '',
 		stderr: 'Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID.\n'
 	})
+})
+
+test('--env-file supplies the Cloudflare credentials', async () => {
+	const envFile = join(directory, '.env')
+	await writeFile(
+		envFile,
+		'CLOUDFLARE_API_TOKEN=token\nCLOUDFLARE_ACCOUNT_ID="account"\n'
+	)
+	const url = `http://localhost:${server.port}/about`
+	const { code, stdout } = await run(
+		[url, '--no-render', '--env-file', envFile],
+		{}
+	)
+	expect(code).toBe(0)
+	expect(stdout).toBe('# About\n\nHello from the fixture.\n')
+
+	// The environment wins over the file; a file that lacks one still fails.
+	await writeFile(envFile, 'CLOUDFLARE_API_TOKEN=token\n')
+	expect((await run([url, '--no-render', '--env-file', envFile])).code).toBe(0)
+	expect(
+		(await run([url, '--no-render', '--env-file', envFile], {})).stderr
+	).toBe('Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID.\n')
+})
+
+test('an unreadable --env-file exits 1', async () => {
+	const envFile = join(directory, 'missing.env')
+	expect(await run(['https://example.com', '--env-file', envFile], {})).toEqual(
+		{ code: 1, stdout: '', stderr: `Cannot read --env-file ${envFile}.\n` }
+	)
 })
