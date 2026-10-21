@@ -13,13 +13,13 @@
         "@biomejs/biome": "^2.2.4",
         "@types/bun": "^1.2.0",
         "@types/node": "^24",
-        "hanzio": "^3.1.0",
+        "hanzio": "^3.3.0",
         "publint": "^0.3.12",
         "typescript": "^5.9.2",
         "zod": "^4.4.3",
       },
       "peerDependencies": {
-        "hanzio": "^3.1.0",
+        "hanzio": "^3.3.0",
         "zod": "^4.0.0",
       },
     },
@@ -145,7 +145,7 @@
 
     "gopd": ["gopd@1.2.0", "", {}, "sha512-ZUKRh6/kUFoAiTAtTYPZJ3hw9wNxx+BIBOijnlG9PnrJsCcSjs1wyyD6vJpaYtgnzDrKYRSqf3OO6Rfa93xsRg=="],
 
-    "hanzio": ["hanzio@3.1.0", "", { "peerDependencies": { "@intlify/message-compiler": ">=10.0.0", "i18next": ">=23.0.0", "libphonenumber-js": "^1.10.0", "vite": ">=6.0.0", "vue-i18n": ">=10.0.0", "zod": "^4.3.6" }, "optionalPeers": ["@intlify/message-compiler", "i18next", "libphonenumber-js", "vite", "vue-i18n", "zod"], "bin": { "hanzio-i18n": "dist/src/i18n/cli.js" } }, "sha512-lpj2r4YMav1vZvkj3/3g8HH80Yuj8WptmSEclEMyD2Ptokc4IVZ9ujYmp+hYNjcPr3HpJv+phGSWEICUIdwveA=="],
+    "hanzio": ["hanzio@3.3.0", "", { "peerDependencies": { "@intlify/message-compiler": ">=10.0.0", "i18next": ">=23.0.0", "libphonenumber-js": "^1.10.0", "vite": ">=6.0.0", "vue-i18n": ">=10.0.0", "zod": "^4.3.6" }, "optionalPeers": ["@intlify/message-compiler", "i18next", "libphonenumber-js", "vite", "vue-i18n", "zod"], "bin": { "hanzio-i18n": "dist/src/i18n/cli.js" } }, "sha512-dyIcdqw5GrY4RrHrzFKb9p9FIKJAKVtM9DDXmCE3fEDTF23Tv0gBWO7HbROf36Dqr1FH0shPGbsGKPAsqv90Cw=="],
 
     "has-flag": ["has-flag@4.0.0", "", {}, "sha512-EykJT/Q1KjTWctppgIAgfSO0tKVuZUjhgMr17kqTumMl6Afv3EISleU7qZUzoXDFTAHTDC4NOoG/ZxU3EvlMPQ=="],
 

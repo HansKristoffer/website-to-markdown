@@ -5,13 +5,31 @@
  */
 import { readFile } from 'node:fs/promises'
 import { parseEnv } from 'node:util'
-import { type CliIO, CliError, defineCli, defineCommand } from 'hanzio/cli'
+import {
+	type CliIO,
+	CliError,
+	CliUsageError,
+	defineCli,
+	defineCommand
+} from 'hanzio/cli'
 import { z } from 'zod'
 import { createWebsiteToMarkdown } from './fetch-page.js'
 
 export const cli = defineCli({
 	name: 'website-to-markdown',
+	// No URL prints the help and exits 1, as 1.0 did.
+	onError: (error, io) => {
+		if (
+			error instanceof CliUsageError &&
+			error.message.split('\n').some((line) => line.startsWith('<url>: '))
+		) {
+			io.stdout.write(error.help)
+			return 1
+		}
+	},
 	commands: defineCommand({
+		// Unknown flags and extra positionals are ignored, as in 1.0.
+		strict: false,
 		description:
 			'Fetch a public URL as markdown. Needs CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID.',
 		input: z.object({
@@ -90,11 +108,10 @@ function readEnvFile(path: string) {
 	})
 }
 
-/** The bin: 1.0 printed the help and exited 1 when no URL was given, even with `--help`. */
+/** The bin. `--help` without a URL exits 1, as in 1.0. */
 export async function main(argv: readonly string[], io?: CliIO) {
-	if (argv.some((arg) => !arg.startsWith('-'))) return cli.run(argv, io)
-	await cli.run(['--help'], io)
-	return 1
+	const code = await cli.run(argv, io)
+	return code === 0 && argv.every((arg) => arg.startsWith('-')) ? 1 : code
 }
 
 if (import.meta.main) process.exitCode = await main(process.argv.slice(2))
