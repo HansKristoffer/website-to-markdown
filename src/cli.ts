@@ -3,6 +3,8 @@
  * Fetch a public URL as markdown and print the result. Page metadata goes to
  * stderr; markdown goes to stdout.
  */
+import { readFile } from 'node:fs/promises'
+import { parseEnv } from 'node:util'
 import { type CliIO, CliError, defineCli, defineCommand } from 'hanzio/cli'
 import { z } from 'zod'
 import { createWebsiteToMarkdown } from './fetch-page.js'
@@ -22,10 +24,18 @@ export const cli = defineCli({
 				.default(true)
 				.describe(
 					'Use the Browser Rendering tier; --no-render keeps to HTML tiers.'
-				)
+				),
+			envFile: z
+				.string()
+				.optional()
+				.describe('Read CLOUDFLARE_* from a dotenv file; the environment wins.')
 		}),
-		run: async ({ url, render }, ctx) => {
-			const { CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID } = ctx.env
+		run: async ({ url, render, envFile }, ctx) => {
+			const file = envFile ? parseEnv(await readEnvFile(envFile)) : {}
+			const CLOUDFLARE_API_TOKEN =
+				ctx.env.CLOUDFLARE_API_TOKEN || file.CLOUDFLARE_API_TOKEN
+			const CLOUDFLARE_ACCOUNT_ID =
+				ctx.env.CLOUDFLARE_ACCOUNT_ID || file.CLOUDFLARE_ACCOUNT_ID
 			if (!CLOUDFLARE_API_TOKEN || !CLOUDFLARE_ACCOUNT_ID)
 				throw new CliError(
 					'Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID.'
@@ -73,6 +83,12 @@ export const cli = defineCli({
 		}
 	})
 })
+
+function readEnvFile(path: string) {
+	return readFile(path, 'utf8').catch(() => {
+		throw new CliError(`Cannot read --env-file ${path}.`)
+	})
+}
 
 /** The bin: 1.0 printed the help and exited 1 when no URL was given, even with `--help`. */
 export async function main(argv: readonly string[], io?: CliIO) {

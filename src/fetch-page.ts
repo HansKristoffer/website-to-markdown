@@ -10,7 +10,13 @@ import {
 	type ContentKind,
 	convertibleDocumentType
 } from './content-type.js'
-import { currentCrawlSnapshot, throughCrawlSnapshot } from './crawl-snapshot.js'
+import {
+	type CrawlSnapshotInput,
+	type CrawlSnapshotOptions,
+	currentCrawlSnapshot,
+	throughCrawlSnapshot,
+	withCrawlSnapshot
+} from './crawl-snapshot.js'
 import {
 	isApplicationShell,
 	isBlankMarkdown,
@@ -473,7 +479,18 @@ export type WebsiteToMarkdownOptions = {
 	createLimit?: CreateConcurrencyLimit
 	/** Workers AI client errors other than 429s, for an error tracker. */
 	onApiError?: (error: ApiError) => void
+	/**
+	 * Pass Workers AI timeouts to `onApiError`. A timed-out page falls through
+	 * to the next tier, so `false` keeps import bursts out of error tracking.
+	 * Default true.
+	 */
+	reportTimeouts?: boolean
 	logger?: Logger
+	/**
+	 * Where the returned `withCrawlSnapshot` keeps snapshots. Its logger
+	 * defaults to `logger`.
+	 */
+	crawlSnapshot?: CrawlSnapshotOptions
 	/** The OCR tier for a PDF Workers AI returned nothing for. */
 	parsePdf?: PdfParser
 	/**
@@ -494,6 +511,7 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 		credentials: options.cloudflare,
 		createLimit,
 		onApiError: options.onApiError,
+		reportTimeouts: options.reportTimeouts,
 		logger
 	})
 	const hostLimits = createHostLimits(createLimit)
@@ -1003,7 +1021,23 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 		convertDocumentBytes,
 		urlToMarkdown,
 		convertFileWithWorkersAi: client.convertFileWithWorkersAi,
-		renderUrlToMarkdown: client.renderUrlToMarkdown
+		renderUrlToMarkdown: client.renderUrlToMarkdown,
+		/** The SSRF guard the converter runs, bound to its `logger`. */
+		isHostAllowed: allowHost,
+		/** `withCrawlSnapshot` bound to the `crawlSnapshot` option. */
+		withCrawlSnapshot<T>(
+			input: CrawlSnapshotInput | null | undefined,
+			run: () => Promise<T>
+		) {
+			if (!input) return run()
+			if (!options.crawlSnapshot) {
+				throw new Error('Set crawlSnapshot.root to use crawl snapshots')
+			}
+			return withCrawlSnapshot(input, run, {
+				root: options.crawlSnapshot.root,
+				logger: options.crawlSnapshot.logger ?? logger
+			})
+		}
 	}
 }
 

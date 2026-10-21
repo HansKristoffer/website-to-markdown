@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test'
+import { createRedisConcurrencyLimit } from 'hanzio/redis'
 import {
+	type CreateConcurrencyLimit,
 	createHostLimits,
 	URL_TO_MARKDOWN_HOST_LIMIT_CACHE_MAX,
 	URL_TO_MARKDOWN_HOST_MAX_CONCURRENCY,
@@ -183,5 +185,20 @@ describe('rate-limited host', () => {
 		expect(peak).toBe(URL_TO_MARKDOWN_THROTTLED_HOST_MAX_CONCURRENCY)
 		expect(Math.min(...starts)).toBeGreaterThanOrEqual(250)
 		expect(await other).toBeLessThan(250)
+	})
+})
+
+describe('hanzio/redis', () => {
+	test('createRedisConcurrencyLimit fits createLimit once send is bound', () => {
+		const send = mock(async () => null)
+		const createLimit: CreateConcurrencyLimit = (options) =>
+			createRedisConcurrencyLimit({ ...options, send })
+		const converter = createWebsiteToMarkdown({
+			cloudflare: { apiToken: 'token', accountId: 'account' },
+			createLimit
+		})
+		expect(converter.fetchPageAsMarkdown).toBeFunction()
+		// Pools are built up front but touch Redis only when a call queues.
+		expect(send).not.toHaveBeenCalled()
 	})
 })
