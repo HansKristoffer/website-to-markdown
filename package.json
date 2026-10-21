@@ -62,16 +62,16 @@
 		"fflate": "^0.8.2"
 	},
 	"peerDependencies": {
-		"hanzio": "^3.0.0",
+		"hanzio": "^3.1.0",
 		"zod": "^4.0.0"
 	},
 	"devDependencies": {
+		"@arethetypeswrong/cli": "^0.18.2",
 		"@biomejs/biome": "^2.2.4",
 		"@types/bun": "^1.2.0",
-		"typescript": "^5.9.2",
-		"@arethetypeswrong/cli": "^0.18.2",
-		"hanzio": "^3.0.0",
+		"hanzio": "^3.1.0",
 		"publint": "^0.3.12",
+		"typescript": "^5.9.2",
 		"zod": "^4.4.3"
 	},
 	"bugs": {

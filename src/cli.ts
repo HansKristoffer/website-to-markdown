@@ -3,76 +3,82 @@
  * Fetch a public URL as markdown and print the result. Page metadata goes to
  * stderr; markdown goes to stdout.
  */
+import { type CliIO, CliError, defineCli, defineCommand } from 'hanzio/cli'
+import { z } from 'zod'
 import { createWebsiteToMarkdown } from './fetch-page.js'
 
-const HELP = `
-Fetch a public URL as markdown.
+export const cli = defineCli({
+	name: 'website-to-markdown',
+	commands: defineCommand({
+		description:
+			'Fetch a public URL as markdown. Needs CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID.',
+		input: z.object({
+			url: z
+				.string()
+				.describe('e.g. https://example.com/about')
+				.meta({ positional: true }),
+			render: z
+				.boolean()
+				.default(true)
+				.describe(
+					'Use the Browser Rendering tier; --no-render keeps to HTML tiers.'
+				)
+		}),
+		run: async ({ url, render }, ctx) => {
+			const { CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID } = ctx.env
+			if (!CLOUDFLARE_API_TOKEN || !CLOUDFLARE_ACCOUNT_ID)
+				throw new CliError(
+					'Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID.'
+				)
 
-Usage:
-  website-to-markdown <url> [--no-render]
+			const { fetchPageAsMarkdown } = createWebsiteToMarkdown({
+				cloudflare: {
+					apiToken: CLOUDFLARE_API_TOKEN,
+					accountId: CLOUDFLARE_ACCOUNT_ID
+				}
+			})
 
-Options:
-  --no-render   Skip the Browser Rendering tier (HTML tiers only).
+			ctx.stderr.write(`Fetching ${url}…\n`)
 
-Environment:
-  CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID
+			const page = await fetchPageAsMarkdown({ url, render })
 
-Example:
-  website-to-markdown https://example.com/about
-`.trim()
+			ctx.stderr.write(
+				`${JSON.stringify(
+					{
+						outcome: page.outcome,
+						status: page.status,
+						source: page.source,
+						url: page.url,
+						finalUrl: page.finalUrl,
+						contentType: page.contentType,
+						etag: page.etag,
+						lastModified: page.lastModified,
+						title: page.title,
+						lang: page.lang,
+						canonical: page.canonical,
+						metaDescription: page.metaDescription,
+						jsonLdBlocks: page.jsonLd.length,
+						links: page.links.length,
+						images: page.images.length,
+						markdownChars: page.markdown.length,
+						durationMs: page.durationMs
+					},
+					null,
+					2
+				)}\n`
+			)
 
-const args = Bun.argv.slice(2)
-const url = args.find((arg) => !arg.startsWith('-'))
-if (!url || args.includes('-h') || args.includes('--help')) {
-	console.log(HELP)
-	process.exit(url ? 0 : 1)
-}
-
-const { CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID } = process.env
-if (!CLOUDFLARE_API_TOKEN || !CLOUDFLARE_ACCOUNT_ID) {
-	console.error('Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID.')
-	process.exit(1)
-}
-
-const { fetchPageAsMarkdown } = createWebsiteToMarkdown({
-	cloudflare: {
-		apiToken: CLOUDFLARE_API_TOKEN,
-		accountId: CLOUDFLARE_ACCOUNT_ID
-	}
+			if (page.outcome !== 'ok') ctx.exitCode = 1
+			return page.markdown
+		}
+	})
 })
 
-console.error(`Fetching ${url}…`)
+/** The bin: 1.0 printed the help and exited 1 when no URL was given, even with `--help`. */
+export async function main(argv: readonly string[], io?: CliIO) {
+	if (argv.some((arg) => !arg.startsWith('-'))) return cli.run(argv, io)
+	await cli.run(['--help'], io)
+	return 1
+}
 
-const page = await fetchPageAsMarkdown({
-	url,
-	render: !args.includes('--no-render')
-})
-
-console.error(
-	JSON.stringify(
-		{
-			outcome: page.outcome,
-			status: page.status,
-			source: page.source,
-			url: page.url,
-			finalUrl: page.finalUrl,
-			contentType: page.contentType,
-			etag: page.etag,
-			lastModified: page.lastModified,
-			title: page.title,
-			lang: page.lang,
-			canonical: page.canonical,
-			metaDescription: page.metaDescription,
-			jsonLdBlocks: page.jsonLd.length,
-			links: page.links.length,
-			images: page.images.length,
-			markdownChars: page.markdown.length,
-			durationMs: page.durationMs
-		},
-		null,
-		2
-	)
-)
-
-console.log(page.markdown)
-if (page.outcome !== 'ok') process.exit(1)
+if (import.meta.main) process.exitCode = await main(process.argv.slice(2))
