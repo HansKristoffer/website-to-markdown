@@ -119,3 +119,10 @@ test('an unreadable --env-file exits 1', async () => {
 		{ code: 1, stdout: '', stderr: `Cannot read --env-file ${envFile}.\n` }
 	)
 })
+
+test('unknown flags and extra positionals are ignored', async () => {
+	const url = `http://localhost:${server.port}/about`
+	const { code, stdout } = await run([url, 'extra', '--bogus', '--no-render'])
+	expect(code).toBe(0)
+	expect(stdout).toBe('# About\n\nHello from the fixture.\n')
+})
