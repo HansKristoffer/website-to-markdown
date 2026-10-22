@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
+import { invariant, type Nullable } from 'hanzio'
 import { sha256Hex } from './hash.js'
 import type { Logger } from './logger.js'
 import {
@@ -40,17 +41,19 @@ export type CrawlSnapshotOptions = {
 const snapshot = new AsyncLocalStorage<CrawlSnapshot>()
 
 export function withCrawlSnapshot<T>(
-	input: CrawlSnapshotInput | null | undefined,
+	input: Nullable<CrawlSnapshotInput>,
 	run: () => Promise<T>,
 	options: CrawlSnapshotOptions
 ) {
 	if (!input) return run()
-	if (process.env.NODE_ENV === 'production') {
-		throw new Error('A crawl snapshot is a local bench tool')
-	}
-	if (!CRAWL_SNAPSHOT_NAME_PATTERN.test(input.name)) {
-		throw new Error(`Invalid crawl snapshot name: ${input.name}`)
-	}
+	invariant(
+		process.env.NODE_ENV !== 'production',
+		'A crawl snapshot is a local bench tool'
+	)
+	invariant(
+		CRAWL_SNAPSHOT_NAME_PATTERN.test(input.name),
+		`Invalid crawl snapshot name: ${input.name}`
+	)
 
 	return snapshot.run(
 		{

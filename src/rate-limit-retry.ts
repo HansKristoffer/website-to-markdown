@@ -1,3 +1,12 @@
+import {
+	exponentialBackoff,
+	getAtPath,
+	isNumber,
+	isRecord,
+	isString,
+	safeJsonParse
+} from 'hanzio'
+
 /**
  * Bounded retries for Cloudflare 429s (Workers AI code 971 / Browser Rendering).
  *
@@ -27,28 +36,15 @@ const THROTTLE_971_BACKOFF_MS = 5_000
 const MAX_BACKOFF_MS = 20_000
 
 export function cloudflareErrorCode(error: unknown): number | null {
-	if (typeof error !== 'object' || !error) return null
-	const body =
-		'body' in error && typeof error.body === 'string' ? error.body : null
+	if (!isRecord(error)) return null
 	const bodyJson =
-		'bodyJson' in error && error.bodyJson && typeof error.bodyJson === 'object'
+		error.bodyJson && typeof error.bodyJson === 'object'
 			? error.bodyJson
-			: body
-				? safeJson(body)
+			: isString(error.body) && error.body
+				? safeJsonParse(error.body).data
 				: null
-	if (!bodyJson || typeof bodyJson !== 'object') return null
-	const errors = (bodyJson as { errors?: unknown }).errors
-	if (!Array.isArray(errors) || errors.length === 0) return null
-	const code = (errors[0] as { code?: unknown }).code
-	return typeof code === 'number' ? code : null
-}
-
-function safeJson(raw: string) {
-	try {
-		return JSON.parse(raw) as unknown
-	} catch {
-		return null
-	}
+	const code = getAtPath(bodyJson, ['errors', 0, 'code'])
+	return isNumber(code) ? code : null
 }
 
 /**
@@ -66,7 +62,11 @@ export function rateLimitBackoffMs(
 		cloudflareErrorCode(error) === 971
 			? THROTTLE_971_BACKOFF_MS
 			: DEFAULT_BACKOFF_MS
-	const exponential = floor * 2 ** Math.max(0, attempt - 1)
+	const exponential = exponentialBackoff(attempt, {
+		baseMs: floor,
+		maxMs: MAX_BACKOFF_MS,
+		jitter: false
+	})
 	const base = Math.min(MAX_BACKOFF_MS, retryAfterMs ?? exponential)
 	const jitter = Math.floor(random() * Math.max(250, base * 0.2))
 	return base + jitter

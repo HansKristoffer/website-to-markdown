@@ -1,13 +1,11 @@
-import { parseRetryAfter } from 'hanzio'
+import { clamp, isFunction, isRecord, parseRetryAfter } from 'hanzio'
 
 const DEFAULT_RETRY_AFTER_MS = 1_000
 const MAX_RETRY_AFTER_MS = 5 * 60 * 1_000
 
 function headerGet(headers: unknown, name: string): string | null {
-	if (!headers || typeof headers !== 'object') return null
-	if (typeof (headers as { get?: unknown }).get === 'function') {
-		return (headers as { get: (key: string) => string | null }).get(name)
-	}
+	if (!isRecord(headers)) return null
+	if (isFunction(headers.get)) return headers.get(name)
 	const record = headers as Record<string, string>
 	return record[name] ?? record[name.toLowerCase()] ?? null
 }
@@ -20,23 +18,17 @@ function headerGet(headers: unknown, name: string): string | null {
 export function rateLimitFromError(
 	error: unknown
 ): { retryAfterMs: number | null } | null {
-	if (typeof error !== 'object' || !error) return null
-	const status =
-		'status' in error && typeof error.status === 'number' ? error.status : null
-	if (status !== 429) return null
+	if (!isRecord(error) || error.status !== 429) return null
 
 	const raw =
-		headerGet('headers' in error ? error.headers : null, 'retry-after') ??
-		headerGet(
-			'responseHeaders' in error ? error.responseHeaders : null,
-			'retry-after'
-		)
+		headerGet(error.headers, 'retry-after') ??
+		headerGet(error.responseHeaders, 'retry-after')
 	const parsed = parseRetryAfter(raw)
 	return {
 		retryAfterMs:
 			parsed === undefined
 				? null
-				: Math.min(MAX_RETRY_AFTER_MS, Math.ceil(parsed))
+				: clamp(Math.ceil(parsed), 0, MAX_RETRY_AFTER_MS)
 	}
 }
 
@@ -44,8 +36,9 @@ export function rateLimitFromError(
 export function retryAfterMsFromError(error: unknown) {
 	const info = rateLimitFromError(error)
 	if (!info) return null
-	return Math.min(
-		MAX_RETRY_AFTER_MS,
-		Math.ceil(info.retryAfterMs ?? DEFAULT_RETRY_AFTER_MS)
+	return clamp(
+		Math.ceil(info.retryAfterMs ?? DEFAULT_RETRY_AFTER_MS),
+		0,
+		MAX_RETRY_AFTER_MS
 	)
 }

@@ -1,17 +1,19 @@
-const MARKDOWN_CONTENT_TYPES = new Set([
+import { isOneOf, type Nullable } from 'hanzio'
+
+const MARKDOWN_CONTENT_TYPES = [
 	'text/markdown',
 	'text/x-markdown',
 	'application/markdown'
-])
+] as const
 
-const HTML_CONTENT_TYPES = new Set(['text/html', 'application/xhtml+xml'])
+const HTML_CONTENT_TYPES = ['text/html', 'application/xhtml+xml'] as const
 
-const TEXTUAL_CONTENT_TYPES = new Set([
+const TEXTUAL_CONTENT_TYPES = [
 	'application/xml',
 	'application/json',
 	'application/rss+xml',
 	'application/atom+xml'
-])
+] as const
 
 /**
  * The formats Workers AI `toMarkdown` accepts as documents (its `/supported`
@@ -42,7 +44,7 @@ const CONVERTIBLE_DOCUMENT_EXTENSIONS = new Map([
 	['application/vnd.oasis.opendocument.presentation', 'odp']
 ])
 
-function normalizeContentType(contentType: string | null | undefined) {
+function normalizeContentType(contentType: Nullable<string>) {
 	return contentType?.split(';')[0]?.trim().toLowerCase() ?? ''
 }
 
@@ -50,7 +52,7 @@ function isTextualContentType(type: string) {
 	return (
 		type === '' ||
 		type.startsWith('text/') ||
-		TEXTUAL_CONTENT_TYPES.has(type) ||
+		isOneOf(TEXTUAL_CONTENT_TYPES, type) ||
 		// `application/ld+json`, `application/rdf+xml`, … but not `image/svg+xml`.
 		(type.startsWith('application/') &&
 			(type.endsWith('+json') || type.endsWith('+xml')))
@@ -69,8 +71,8 @@ export type ContentKind = 'markdown' | 'html' | 'text' | 'document' | 'asset'
 /** What the fetch layer should do with a body, decided from the header alone. */
 export function classifyContentType(contentType: string | null): ContentKind {
 	const type = normalizeContentType(contentType)
-	if (MARKDOWN_CONTENT_TYPES.has(type)) return 'markdown'
-	if (HTML_CONTENT_TYPES.has(type)) return 'html'
+	if (isOneOf(MARKDOWN_CONTENT_TYPES, type)) return 'markdown'
+	if (isOneOf(HTML_CONTENT_TYPES, type)) return 'html'
 	if (CONVERTIBLE_DOCUMENT_EXTENSIONS.has(type)) return 'document'
 	if (isTextualContentType(type)) return 'text'
 	return 'asset'

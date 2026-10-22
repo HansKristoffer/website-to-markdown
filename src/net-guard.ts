@@ -1,4 +1,5 @@
 import { lookup } from 'node:dns/promises'
+import { createCache, isOneOf } from 'hanzio'
 import { errorLogAttributes, type Logger, silentLogger } from './logger.js'
 
 /** One crawl hits the same host hundreds of times; DNS is not cached by Node. */
@@ -116,10 +117,13 @@ export function isBlockedAddress(address: string): boolean {
 
 export function isLocalhostHostname(hostname: string) {
 	const host = hostname.toLowerCase().replace(/^\[|\]$/g, '')
-	return host === 'localhost' || host === '127.0.0.1' || host === '::1'
+	return isOneOf(['localhost', '127.0.0.1', '::1'], host)
 }
 
-const resolutionCache = new Map<string, { allowed: boolean; atMs: number }>()
+const resolutionCache = createCache({
+	defaultTtlMs: RESOLUTION_TTL_MS,
+	maxEntries: RESOLUTION_CACHE_MAX
+})
 
 /**
  * SSRF guard: a customer can put any hostname in the website field, and an
@@ -134,10 +138,8 @@ export async function isHostAllowed(
 		return process.env.NODE_ENV !== 'production'
 	}
 
-	const cached = resolutionCache.get(hostname)
-	if (cached && Date.now() - cached.atMs < RESOLUTION_TTL_MS) {
-		return cached.allowed
-	}
+	const cached = resolutionCache.get<boolean>(hostname)
+	if (cached !== undefined) return cached
 
 	let allowed = false
 	try {
@@ -161,10 +163,6 @@ export async function isHostAllowed(
 		return true
 	}
 
-	if (resolutionCache.size >= RESOLUTION_CACHE_MAX) {
-		const oldest = resolutionCache.keys().next().value
-		if (oldest) resolutionCache.delete(oldest)
-	}
-	resolutionCache.set(hostname, { allowed, atMs: Date.now() })
+	resolutionCache.set(hostname, allowed)
 	return allowed
 }
