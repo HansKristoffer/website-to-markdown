@@ -1,4 +1,4 @@
-import { escapeRegExp } from 'hanzio'
+import { createCache, escapeRegExp, trimTrailingSlash } from 'hanzio'
 import { throughCrawlSnapshot } from '../crawl-snapshot.js'
 
 const FETCH_TIMEOUT_MS = 10_000
@@ -160,11 +160,15 @@ export function parseRobotsRules(body: string) {
 	return rules
 }
 
-/** Compiled once per pattern: the crawl asks for every link of every page. */
-const robotsPatternCache = new Map<string, RegExp>()
+/**
+ * Compiled once per pattern: the crawl asks for every link of every page.
+ * Every site's patterns land here, so a long-lived worker drops the least
+ * recently used rather than grow.
+ */
+const robotsPatternCache = createCache({ maxEntries: 5_000 })
 
 function robotsPatternRegex(pattern: string) {
-	const cached = robotsPatternCache.get(pattern)
+	const cached = robotsPatternCache.get<RegExp>(pattern)
 	if (cached) return cached
 
 	const anchored = pattern.endsWith('$')
@@ -173,8 +177,6 @@ function robotsPatternRegex(pattern: string) {
 		.map((part) => escapeRegExp(part))
 		.join('.*')
 	const regex = new RegExp(`^${body}${anchored ? '$' : ''}`)
-	// Every site's patterns land here; a long-lived worker starts over rather than grow.
-	if (robotsPatternCache.size >= 5_000) robotsPatternCache.clear()
 	robotsPatternCache.set(pattern, regex)
 	return regex
 }
@@ -291,8 +293,8 @@ export function normalizeSitemapUrl(url: string) {
 	try {
 		const parsed = new URL(url)
 		parsed.hash = ''
-		return parsed.toString().replace(/\/+$/, '')
+		return trimTrailingSlash(parsed.toString())
 	} catch {
-		return url.replace(/\/+$/, '')
+		return trimTrailingSlash(url)
 	}
 }

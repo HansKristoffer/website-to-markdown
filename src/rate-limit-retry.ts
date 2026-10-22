@@ -1,3 +1,5 @@
+import { isRecord, safeJsonParse } from 'hanzio'
+
 /**
  * Bounded retries for Cloudflare 429s (Workers AI code 971 / Browser Rendering).
  *
@@ -27,28 +29,18 @@ const THROTTLE_971_BACKOFF_MS = 5_000
 const MAX_BACKOFF_MS = 20_000
 
 export function cloudflareErrorCode(error: unknown): number | null {
-	if (typeof error !== 'object' || !error) return null
-	const body =
-		'body' in error && typeof error.body === 'string' ? error.body : null
+	if (!isRecord(error)) return null
 	const bodyJson =
-		'bodyJson' in error && error.bodyJson && typeof error.bodyJson === 'object'
+		error.bodyJson && typeof error.bodyJson === 'object'
 			? error.bodyJson
-			: body
-				? safeJson(body)
+			: typeof error.body === 'string' && error.body
+				? safeJsonParse(error.body).data
 				: null
-	if (!bodyJson || typeof bodyJson !== 'object') return null
-	const errors = (bodyJson as { errors?: unknown }).errors
+	if (!isRecord(bodyJson)) return null
+	const errors = bodyJson.errors
 	if (!Array.isArray(errors) || errors.length === 0) return null
 	const code = (errors[0] as { code?: unknown }).code
 	return typeof code === 'number' ? code : null
-}
-
-function safeJson(raw: string) {
-	try {
-		return JSON.parse(raw) as unknown
-	} catch {
-		return null
-	}
 }
 
 /**

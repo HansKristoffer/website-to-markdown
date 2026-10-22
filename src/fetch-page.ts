@@ -1,15 +1,17 @@
+import {
+	isRecord,
+	parseRetryAfter,
+	timeoutSignal,
+	typedSwitch,
+	typedSwitchGroup
+} from 'hanzio'
 import type { ApiError } from 'hanzio/api-wrapper'
-import { parseRetryAfter } from 'hanzio'
 import {
 	type CloudflareCredentials,
 	CloudflareRateLimitedError,
 	createCloudflareClient
 } from './client.js'
-import {
-	classifyContentType,
-	type ContentKind,
-	convertibleDocumentType
-} from './content-type.js'
+import { classifyContentType, convertibleDocumentType } from './content-type.js'
 import {
 	type CrawlSnapshotInput,
 	type CrawlSnapshotOptions,
@@ -290,12 +292,13 @@ function parseFinalUrl(responseUrl: string, requestUrl: URL) {
 }
 
 function isAbortError(error: unknown) {
-	const name =
-		typeof error === 'object' && error && 'name' in error
-			? String(error.name)
-			: ''
+	const name = isRecord(error) ? error.name : undefined
 	return name === 'AbortError' || name === 'TimeoutError'
 }
+
+/** The content kinds whose body is read as text; the rest are documents or assets. */
+const TEXTUAL_KINDS = ['markdown', 'html', 'text'] as const
+type TextualKind = (typeof TEXTUAL_KINDS)[number]
 
 /** What the origin gave us, already downloaded under the host's politeness slot. */
 type OriginBody =
@@ -333,32 +336,42 @@ async function readOriginBody(
 
 	const contentType = response.headers.get('content-type')
 	const kind = classifyContentType(contentType)
-	if (kind === 'asset') {
-		discardBody(response)
-		return { kind: 'none' }
-	}
-	if (kind === 'document') {
-		const type = convertibleDocumentType(contentType)
-		if (!type) {
+	return typedSwitch(kind, {
+		asset: () => {
 			discardBody(response)
 			return { kind: 'none' }
-		}
-		const limit = type.extension === 'pdf' ? MAX_PDF_BYTES : MAX_DOCUMENT_BYTES
-		const declared = Number(response.headers.get('content-length'))
-		if (Number.isFinite(declared) && declared > limit) {
-			discardBody(response)
-			logger.info('url-to-markdown.document_oversized', {
-				url: finalUrl.href,
-				bytes: declared
+		},
+		document: async () => {
+			const type = convertibleDocumentType(contentType)
+			if (!type) {
+				discardBody(response)
+				return { kind: 'none' }
+			}
+			const limit =
+				type.extension === 'pdf' ? MAX_PDF_BYTES : MAX_DOCUMENT_BYTES
+			const declared = Number(response.headers.get('content-length'))
+			if (Number.isFinite(declared) && declared > limit) {
+				discardBody(response)
+				logger.info('url-to-markdown.document_oversized', {
+					url: finalUrl.href,
+					bytes: declared
+				})
+				return { kind: 'none', captureIssue: 'document_byte_limit' }
+			}
+			const bytes = await readBoundedBody(response, limit)
+			return bytes
+				? { kind: 'bytes', bytes }
+				: { kind: 'none', captureIssue: 'document_byte_limit' }
+		},
+		...typedSwitchGroup(
+			kind,
+			TEXTUAL_KINDS,
+			async (): Promise<OriginBody> => ({
+				kind: 'text',
+				text: await response.text()
 			})
-			return { kind: 'none', captureIssue: 'document_byte_limit' }
-		}
-		const bytes = await readBoundedBody(response, limit)
-		return bytes
-			? { kind: 'bytes', bytes }
-			: { kind: 'none', captureIssue: 'document_byte_limit' }
-	}
-	return { kind: 'text', text: await response.text() }
+		)
+	})
 }
 
 function documentFilename(finalUrl: string, extension: string) {
@@ -433,12 +446,6 @@ function withoutHiddenUi(html: string) {
 
 /** A real browser passes these; every other 4xx has nothing for it to find. */
 const BOT_WALL_STATUSES = new Set([401, 403])
-
-/** `AbortSignal.timeout` and the caller's signal, whichever fires first. */
-function timeoutSignal(ms: number, signal: AbortSignal | undefined) {
-	const timeout = AbortSignal.timeout(ms)
-	return signal ? AbortSignal.any([timeout, signal]) : timeout
-}
 
 export type FetchPageInput = {
 	url: string
@@ -653,8 +660,11 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 			return {
 				outcome: 'unsupported',
 				source: null,
-				captureIssue:
-					input.body.kind === 'none' ? input.body.captureIssue : null
+				captureIssue: typedSwitch(input.body, 'kind', {
+					none: (body) => body.captureIssue,
+					text: () => null,
+					bytes: () => null
+				})
 			}
 		}
 		return convertDocumentBytes({
@@ -668,7 +678,7 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 
 	async function convertTextual(input: {
 		text: string
-		kind: ContentKind
+		kind: TextualKind
 		finalUrl: URL
 		render: boolean
 		/** The hash of the HTML last read; see `FetchedPage.htmlHash`. */
@@ -679,9 +689,11 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 		// The `Content-Type` header is authoritative - sniffing for a leading
 		// `<html` misses every page that opens with a comment or a CDN banner - but
 		// a `text/plain` body that is plainly HTML still needs the HTML tier.
-		const isHtml =
-			input.kind === 'html' ||
-			(input.kind !== 'markdown' && looksLikeHtml(body))
+		const isHtml = typedSwitch(input.kind, {
+			html: () => true,
+			markdown: () => false,
+			text: () => looksLikeHtml(body)
+		})
 
 		if (!isHtml && !isBlankMarkdown(body)) {
 			return { outcome: 'ok', source: 'content-negotiation', markdown: body }
@@ -807,23 +819,30 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 		}
 
 		const kind = classifyContentType(contentType)
-		if (kind === 'asset') return { outcome: 'unsupported', source: null }
-		if (kind === 'document') {
-			return convertDocument({
-				body,
-				contentType,
-				finalUrl: input.finalUrl,
-				signal: input.signal
-			})
-		}
-		if (body.kind !== 'text') return { outcome: 'unsupported', source: null }
-		return convertTextual({
-			text: body.text,
-			kind,
-			finalUrl: input.finalUrl,
-			render: input.render,
-			htmlHash: input.htmlHash,
-			signal: input.signal
+		return typedSwitch(kind, {
+			asset: () => ({ outcome: 'unsupported', source: null }),
+			document: () =>
+				convertDocument({
+					body,
+					contentType,
+					finalUrl: input.finalUrl,
+					signal: input.signal
+				}),
+			...typedSwitchGroup(
+				kind,
+				TEXTUAL_KINDS,
+				async (textualKind): Promise<PageBody> =>
+					body.kind === 'text'
+						? convertTextual({
+								text: body.text,
+								kind: textualKind,
+								finalUrl: input.finalUrl,
+								render: input.render,
+								htmlHash: input.htmlHash,
+								signal: input.signal
+							})
+						: { outcome: 'unsupported', source: null }
+			)
 		})
 	}
 
@@ -955,9 +974,12 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 					lastModified: null,
 					startedAt
 				},
-				// A refused host is a policy decision, not a retryable network blip.
 				{
-					outcome: attempt.kind === 'refused' ? 'blocked' : 'transient',
+					outcome: typedSwitch(attempt, 'kind', {
+						// A refused host is a policy decision, not a retryable network blip.
+						refused: () => 'blocked',
+						failed: () => 'transient'
+					}),
 					source: null
 				},
 				logger

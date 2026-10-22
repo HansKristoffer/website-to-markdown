@@ -1,3 +1,4 @@
+import { safeJsonParse } from 'hanzio'
 import { decodeHtmlEntities } from './html-entities.js'
 
 const TITLE_RE = /<title[^>]*>([\s\S]*?)<\/title>/i
@@ -51,15 +52,13 @@ function parseJsonLd(html: string) {
 	for (const match of html.matchAll(JSON_LD_RE)) {
 		const body = match[1]?.trim()
 		if (!body) continue
-		try {
-			const parsed: unknown = JSON.parse(body)
-			// A single script may hold an array of nodes; flatten so the profile
-			// layer can look for `@type` without walking two shapes.
-			if (Array.isArray(parsed)) blocks.push(...parsed)
-			else blocks.push(parsed)
-		} catch {
-			// Hand-written JSON-LD with a trailing comma is common; skip the block.
-		}
+		const parsed = safeJsonParse(body)
+		// Hand-written JSON-LD with a trailing comma is common; skip the block.
+		if (!parsed.ok) continue
+		// A single script may hold an array of nodes; flatten so the profile
+		// layer can look for `@type` without walking two shapes.
+		if (Array.isArray(parsed.data)) blocks.push(...parsed.data)
+		else blocks.push(parsed.data)
 	}
 	return blocks
 }
