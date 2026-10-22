@@ -1,3 +1,4 @@
+import { compact, getUniqueValues, isOneOf } from 'hanzio'
 import { decodeHtmlEntities } from './html-entities.js'
 
 /**
@@ -92,9 +93,7 @@ function resolveTarget(target: string, baseUrl: string) {
 		const resolved = new URL(raw, baseUrl)
 		// Drops `mailto:`, `tel:`, `javascript:`, `data:` and every other scheme
 		// discovery cannot crawl; they stay in the markdown itself.
-		if (resolved.protocol !== 'https:' && resolved.protocol !== 'http:') {
-			return null
-		}
+		if (!isOneOf(['https:', 'http:'], resolved.protocol)) return null
 		// Cloudflare's reserved prefix is plumbing, never a page: the e-mail
 		// obfuscation endpoint under it answers 410, which used to count as a
 		// page this site failed to deliver. `clean-pages.ts` decodes the address
@@ -106,37 +105,32 @@ function resolveTarget(target: string, baseUrl: string) {
 	}
 }
 
+/** Resolved targets, deduped, in the order they were found. */
+function resolveUnique(targets: (string | undefined)[], baseUrl: string) {
+	return getUniqueValues(
+		compact(
+			targets.map((target) => (target ? resolveTarget(target, baseUrl) : null))
+		)
+	)
+}
+
 /**
  * Absolute, deduped, document-order links and images. Discovery crawls these,
  * so relative targets (`/kontakt`) and CMS-escaped query strings
  * (`?image=x&amp;width=200`) have to come out resolved and decoded.
  */
 export function markdownRefs(markdown: string, baseUrl: string) {
-	const links: string[] = []
-	const images: string[] = []
-	const seenLinks = new Set<string>()
-	const seenImages = new Set<string>()
-
-	const push = (isImage: boolean, target: string) => {
-		const resolved = resolveTarget(target, baseUrl)
-		if (!resolved) return
-		const seen = isImage ? seenImages : seenLinks
-		if (seen.has(resolved)) return
-		seen.add(resolved)
-		;(isImage ? images : links).push(resolved)
+	const images = [...markdown.matchAll(IMAGE_RE)].map((match) => match[1])
+	const links = [
+		...[...markdown.matchAll(LINK_RE)].map((match) =>
+			match[1] === '!' ? undefined : match[2]
+		),
+		...[...markdown.matchAll(AUTOLINK_RE)].map((match) => match[1])
+	]
+	return {
+		links: resolveUnique(links, baseUrl),
+		images: resolveUnique(images, baseUrl)
 	}
-
-	for (const match of markdown.matchAll(IMAGE_RE)) {
-		if (match[1]) push(true, match[1])
-	}
-	for (const match of markdown.matchAll(LINK_RE)) {
-		if (match[1] !== '!' && match[2]) push(false, match[2])
-	}
-	for (const match of markdown.matchAll(AUTOLINK_RE)) {
-		if (match[1]) push(false, match[1])
-	}
-
-	return { links, images }
 }
 
 const ANCHOR_HREF_RE = /<a\b[^>]*?\bhref\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi
@@ -160,38 +154,29 @@ const NON_MARKUP_RE = /<(script|style|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi
  * reachable if ANY representation mentions it.
  */
 export function htmlLinks(html: string, baseUrl: string): string[] {
-	const links: string[] = []
-	const seen = new Set<string>()
-	for (const match of html
-		.replace(NON_MARKUP_RE, ' ')
-		.matchAll(ANCHOR_HREF_RE)) {
+	const targets = [
+		...html.replace(NON_MARKUP_RE, ' ').matchAll(ANCHOR_HREF_RE)
+	].map((match) => {
 		const raw = match[1]
-		if (!raw) continue
+		if (!raw) return undefined
 		const first = raw[0]
 		const target =
 			(first === '"' || first === "'") && raw.endsWith(first)
 				? raw.slice(1, -1)
 				: raw
-		const resolved = resolveTarget(decodeHtmlEntities(target), baseUrl)
-		if (!resolved || seen.has(resolved)) continue
-		seen.add(resolved)
-		links.push(resolved)
-	}
-	return links
+		return decodeHtmlEntities(target)
+	})
+	return resolveUnique(targets, baseUrl)
 }
 
 /** Conversion may omit an image-only menu; retain original and lazy asset URLs. */
 export function htmlImages(html: string, baseUrl: string): string[] {
-	const images = new Set<string>()
-	for (const tag of html.matchAll(/<img\b[^>]*>/gi)) {
-		for (const attribute of tag[0].matchAll(
-			/\b(?:src|data-src|data-original)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi
-		)) {
-			const raw = attribute[1]
-			if (!raw) continue
-			const url = resolveTarget(raw.replace(/^["']|["']$/g, ''), baseUrl)
-			if (url) images.add(url)
-		}
-	}
-	return [...images]
+	const targets = [...html.matchAll(/<img\b[^>]*>/gi)].flatMap((tag) =>
+		[
+			...tag[0].matchAll(
+				/\b(?:src|data-src|data-original)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi
+			)
+		].map((attribute) => attribute[1]?.replace(/^["']|["']$/g, ''))
+	)
+	return resolveUnique(targets, baseUrl)
 }

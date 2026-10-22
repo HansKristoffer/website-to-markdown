@@ -1,4 +1,11 @@
-import { isRecord, safeJsonParse } from 'hanzio'
+import {
+	exponentialBackoff,
+	getAtPath,
+	isNumber,
+	isRecord,
+	isString,
+	safeJsonParse
+} from 'hanzio'
 
 /**
  * Bounded retries for Cloudflare 429s (Workers AI code 971 / Browser Rendering).
@@ -33,14 +40,11 @@ export function cloudflareErrorCode(error: unknown): number | null {
 	const bodyJson =
 		error.bodyJson && typeof error.bodyJson === 'object'
 			? error.bodyJson
-			: typeof error.body === 'string' && error.body
+			: isString(error.body) && error.body
 				? safeJsonParse(error.body).data
 				: null
-	if (!isRecord(bodyJson)) return null
-	const errors = bodyJson.errors
-	if (!Array.isArray(errors) || errors.length === 0) return null
-	const code = (errors[0] as { code?: unknown }).code
-	return typeof code === 'number' ? code : null
+	const code = getAtPath(bodyJson, ['errors', 0, 'code'])
+	return isNumber(code) ? code : null
 }
 
 /**
@@ -58,7 +62,11 @@ export function rateLimitBackoffMs(
 		cloudflareErrorCode(error) === 971
 			? THROTTLE_971_BACKOFF_MS
 			: DEFAULT_BACKOFF_MS
-	const exponential = floor * 2 ** Math.max(0, attempt - 1)
+	const exponential = exponentialBackoff(attempt, {
+		baseMs: floor,
+		maxMs: MAX_BACKOFF_MS,
+		jitter: false
+	})
 	const base = Math.min(MAX_BACKOFF_MS, retryAfterMs ?? exponential)
 	const jitter = Math.floor(random() * Math.max(250, base * 0.2))
 	return base + jitter

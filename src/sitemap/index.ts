@@ -1,4 +1,10 @@
-import { createCache, escapeRegExp, trimTrailingSlash } from 'hanzio'
+import {
+	createCache,
+	escapeRegExp,
+	getUniqueValues,
+	isOneOf,
+	trimTrailingSlash
+} from 'hanzio'
 import { throughCrawlSnapshot } from '../crawl-snapshot.js'
 
 const FETCH_TIMEOUT_MS = 10_000
@@ -114,15 +120,16 @@ export async function fetchRobots(websiteUrl: string) {
 		try {
 			const absolute = new URL(value, robotsUrl)
 			// Only what we could actually GET - `ftp:` and friends are noise.
-			if (absolute.protocol !== 'http:' && absolute.protocol !== 'https:')
-				continue
-			const href = absolute.toString()
-			if (!sitemaps.includes(href)) sitemaps.push(href)
+			if (!isOneOf(['http:', 'https:'], absolute.protocol)) continue
+			sitemaps.push(absolute.toString())
 		} catch {
 			// A malformed Sitemap: line must not cost us the other lines.
 		}
 	}
-	return { sitemaps, rules: parseRobotsRules(body) }
+	return {
+		sitemaps: getUniqueValues(sitemaps),
+		rules: parseRobotsRules(body)
+	}
 }
 
 export type RobotsRule = { allow: boolean; pattern: string }
@@ -151,7 +158,7 @@ export function parseRobotsRules(body: string) {
 			agents.push(value.toLowerCase())
 			continue
 		}
-		if (field !== 'allow' && field !== 'disallow') continue
+		if (!isOneOf(['allow', 'disallow'], field)) continue
 
 		inRules = true
 		if (agents.includes('*') && value !== '')

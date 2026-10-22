@@ -1,4 +1,9 @@
-import { safeJsonParse } from 'hanzio'
+import {
+	getUniqueValues,
+	isOneOf,
+	normalizeWhitespace,
+	safeJsonParse
+} from 'hanzio'
 import { decodeHtmlEntities } from './html-entities.js'
 
 const TITLE_RE = /<title[^>]*>([\s\S]*?)<\/title>/i
@@ -30,17 +35,15 @@ function attributesOf(tag: string) {
 }
 
 function cleanText(value: string) {
-	return decodeHtmlEntities(value.replace(HTML_TAG_RE, ' '))
-		.replace(/\s+/g, ' ')
-		.trim()
+	return normalizeWhitespace(
+		decodeHtmlEntities(value.replace(HTML_TAG_RE, ' '))
+	)
 }
 
 function absolute(url: string, baseUrl: string) {
 	try {
 		const resolved = new URL(url, baseUrl)
-		if (resolved.protocol !== 'https:' && resolved.protocol !== 'http:') {
-			return null
-		}
+		if (!isOneOf(['https:', 'http:'], resolved.protocol)) return null
 		return resolved.href
 	} catch {
 		return null
@@ -81,7 +84,7 @@ export function extractHtmlMetadata(html: string, baseUrl: string) {
 	// `<link rel="alternate" hreflang>`: the site's own declaration of which
 	// URLs are translations of this page. `x-default` is a language picker,
 	// not a translation.
-	const alternates = new Set<string>()
+	const alternates: string[] = []
 	/** Each alternate's language (`da` of `da-DK`); what lets a crawl skip a mirror. */
 	const alternateLanguages: Record<string, string> = {}
 	for (const match of html.matchAll(LINK_TAG_RE)) {
@@ -96,7 +99,7 @@ export function extractHtmlMetadata(html: string, baseUrl: string) {
 		if (rel.includes('alternate') && hreflang && hreflang !== 'x-default') {
 			const href = absolute(attributes.href, baseUrl)
 			const language = hreflang.split('-')[0] ?? ''
-			if (href) alternates.add(href)
+			if (href) alternates.push(href)
 			if (href && /^[a-z]{2}$/.test(language))
 				alternateLanguages[href] = language
 		}
@@ -117,7 +120,7 @@ export function extractHtmlMetadata(html: string, baseUrl: string) {
 		title,
 		lang,
 		canonical,
-		alternates: [...alternates],
+		alternates: getUniqueValues(alternates),
 		alternateLanguages,
 		metaDescription: metaDescription || ogDescription || null,
 		jsonLd: parseJsonLd(html)

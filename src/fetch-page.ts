@@ -1,6 +1,15 @@
 import {
+	type ElementOf,
+	exponentialBackoff,
+	fileExtension,
+	getUniqueValues,
+	invariant,
+	isOneOf,
 	isRecord,
+	must,
+	type Nullable,
 	parseRetryAfter,
+	startTimer,
 	timeoutSignal,
 	typedSwitch,
 	typedSwitchGroup
@@ -103,13 +112,13 @@ export type FetchedPage = {
 	/** Absolute, deduped image URLs found in the markdown. */
 	images: string[]
 	durationMs: number
-	captureIssue?: string | null | undefined
+	captureIssue?: Nullable<string>
 	/**
 	 * Hash of the HTML the origin served, when an origin tier read HTML. Given
 	 * back on the next read (`fetchPageAsMarkdown({ htmlHash })`), identical HTML
 	 * is answered as `unchanged` without converting it again.
 	 */
-	htmlHash?: string | null | undefined
+	htmlHash?: Nullable<string>
 }
 
 type PageBase = {
@@ -119,16 +128,16 @@ type PageBase = {
 	contentType: string | null
 	etag: string | null
 	lastModified: string | null
-	startedAt: number
+	elapsedMs: () => number
 }
 
 export type PageBody = {
-	captureIssue?: string | null | undefined
+	captureIssue?: Nullable<string>
 	outcome: FetchOutcome
 	source: FetchSource | null
-	markdown?: string | null | undefined
+	markdown?: Nullable<string>
 	/** The HTML an origin tier read, when one did - the only source of metadata. */
-	html?: string | null | undefined
+	html?: Nullable<string>
 }
 
 /**
@@ -147,7 +156,7 @@ function buildPage(
 	// that wrote "Gård" as "a" plus a combining ring gave the fact guard the
 	// name "Broges Ga", which no draft could contain, and the document shipped
 	// as its verbatim source.
-	const clean = (text: string | null | undefined) =>
+	const clean = (text: Nullable<string>) =>
 		text?.replaceAll('\u0000', '').normalize('NFC')
 	const body = {
 		...rawBody,
@@ -172,7 +181,7 @@ function buildPage(
 	// navigation (image-wrapped anchors, folded menus), so when we hold the
 	// HTML its anchors decide what discovery can still reach.
 	const links = body.html
-		? [...new Set([...refs.links, ...htmlLinks(body.html, base.finalUrl)])]
+		? getUniqueValues([...refs.links, ...htmlLinks(body.html, base.finalUrl)])
 		: refs.links
 
 	return {
@@ -194,17 +203,15 @@ function buildPage(
 			metadata?.metaDescription ?? frontMatter.description ?? null,
 		jsonLd: metadata?.jsonLd ?? [],
 		links,
-		images: [
-			...new Set([
-				...refs.images,
-				...(body.html ? htmlImages(body.html, base.finalUrl) : [])
-			])
-		],
+		images: getUniqueValues([
+			...refs.images,
+			...(body.html ? htmlImages(body.html, base.finalUrl) : [])
+		]),
 		captureIssue:
 			frontMatter.markdown.length > MAX_MARKDOWN_CHARS
 				? 'markdown_limit'
 				: (body.captureIssue ?? null),
-		durationMs: Math.round(performance.now() - base.startedAt),
+		durationMs: Math.round(base.elapsedMs()),
 		htmlHash: body.html ? htmlHash(body.html) : null
 	}
 }
@@ -258,7 +265,15 @@ const MAX_RATE_LIMIT_WAIT_MS = 30_000
 /** The origin's `Retry-After` when it sent one, else 1 s, 2 s, 4 s. */
 function rateLimitWaitMs(response: Response, retry: number) {
 	const askedMs = parseRetryAfter(response.headers.get('retry-after'))
-	return Math.min(MAX_RATE_LIMIT_WAIT_MS, askedMs ?? 1_000 * 2 ** (retry - 1))
+	return Math.min(
+		MAX_RATE_LIMIT_WAIT_MS,
+		askedMs ??
+			exponentialBackoff(retry, {
+				baseMs: 1_000,
+				maxMs: MAX_RATE_LIMIT_WAIT_MS,
+				jitter: false
+			})
+	)
 }
 
 /**
@@ -274,7 +289,7 @@ function htmlHash(html: string) {
 }
 
 /** The request URL with the market pinned; the URL itself when there is none. */
-function inMarket(url: URL, country: string | null | undefined) {
+function inMarket(url: URL, country: Nullable<string>) {
 	if (!country || url.searchParams.has('country')) return url
 	const pinned = new URL(url.href)
 	pinned.searchParams.set('country', country)
@@ -292,13 +307,12 @@ function parseFinalUrl(responseUrl: string, requestUrl: URL) {
 }
 
 function isAbortError(error: unknown) {
-	const name = isRecord(error) ? error.name : undefined
-	return name === 'AbortError' || name === 'TimeoutError'
+	return isRecord(error) && isOneOf(['AbortError', 'TimeoutError'], error.name)
 }
 
 /** The content kinds whose body is read as text; the rest are documents or assets. */
 const TEXTUAL_KINDS = ['markdown', 'html', 'text'] as const
-type TextualKind = (typeof TEXTUAL_KINDS)[number]
+type TextualKind = ElementOf<typeof TEXTUAL_KINDS>
 
 /** What the origin gave us, already downloaded under the host's politeness slot. */
 type OriginBody =
@@ -377,9 +391,7 @@ async function readOriginBody(
 function documentFilename(finalUrl: string, extension: string) {
 	const segment = finalUrl.split(/[?#]/)[0]?.split('/').pop() || 'document'
 	const name = segment.slice(0, 80)
-	return name.toLowerCase().endsWith(`.${extension}`)
-		? name
-		: `${name}.${extension}`
+	return fileExtension(name) === extension ? name : `${name}.${extension}`
 }
 
 /** Streaming limits bound chunked bodies as well as declared Content-Length. */
@@ -445,13 +457,13 @@ function withoutHiddenUi(html: string) {
 }
 
 /** A real browser passes these; every other 4xx has nothing for it to find. */
-const BOT_WALL_STATUSES = new Set([401, 403])
+const BOT_WALL_STATUSES = [401, 403] as const
 
 export type FetchPageInput = {
 	url: string
 	/** Stored validators from the last run; a 304 returns outcome 'unchanged'. */
-	etag?: string | null | undefined
-	lastModified?: string | null | undefined
+	etag?: Nullable<string>
+	lastModified?: Nullable<string>
 	/** Allow the Browser Rendering tier. Default true. */
 	render?: boolean | undefined
 	/**
@@ -460,9 +472,9 @@ export type FetchPageInput = {
 	 * euros and English (Good Habit audit §3.2) - and `?country=DK` pins it.
 	 * Applied to the request only: the page keeps the URL it was asked for.
 	 */
-	country?: string | null | undefined
+	country?: Nullable<string>
 	/** The last read's `htmlHash`; identical HTML comes back `unchanged`. */
-	htmlHash?: string | null | undefined
+	htmlHash?: Nullable<string>
 	signal?: AbortSignal | undefined
 }
 
@@ -615,8 +627,8 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 		}
 		if (input.signal?.aborted) return { outcome: 'transient', source: null }
 		try {
-			if (!options.parsePdf) throw new Error('No PDF parser configured')
-			const parsed = await options.parsePdf({
+			const parsePdf = must(options.parsePdf, 'No PDF parser configured')
+			const parsed = await parsePdf({
 				bytes,
 				filename: input.filename,
 				mimeType: input.mimeType,
@@ -682,7 +694,7 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 		finalUrl: URL
 		render: boolean
 		/** The hash of the HTML last read; see `FetchedPage.htmlHash`. */
-		htmlHash?: string | null | undefined
+		htmlHash?: Nullable<string>
 		signal?: AbortSignal | undefined
 	}): Promise<PageBody> {
 		const body = input.text
@@ -786,7 +798,7 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 	async function readResponse(
 		input: OriginRead & {
 			render: boolean
-			htmlHash?: string | null | undefined
+			htmlHash?: Nullable<string>
 			signal?: AbortSignal | undefined
 		}
 	): Promise<PageBody> {
@@ -795,7 +807,7 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 		const contentType = response.headers.get('content-type')
 
 		if (status === 304) return { outcome: 'unchanged', source: 'not-modified' }
-		if (status === 404 || status === 410) {
+		if (isOneOf([404, 410], status)) {
 			return { outcome: 'gone', source: null }
 		}
 		// Still refused after the host's pauses: rendering would only be refused
@@ -803,7 +815,7 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 		if (status >= 500 || status === 429)
 			return { outcome: 'transient', source: null }
 		if (status >= 400) {
-			if (!input.render || !BOT_WALL_STATUSES.has(status)) {
+			if (!input.render || !isOneOf(BOT_WALL_STATUSES, status)) {
 				return { outcome: 'blocked', source: null }
 			}
 			const rendered = await client.renderUrlToMarkdown(
@@ -900,7 +912,7 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 
 	async function fetchPageLive(input: FetchPageInput): Promise<FetchedPage> {
 		const signal = input.signal ?? currentOperationSignal()
-		const startedAt = performance.now()
+		const elapsedMs = startTimer()
 		const render = input.render ?? true
 
 		const prepared = prepareRequestUrl(input.url)
@@ -913,7 +925,7 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 					contentType: null,
 					etag: null,
 					lastModified: null,
-					startedAt
+					elapsedMs
 				},
 				{ outcome: 'unsupported', source: null },
 				logger
@@ -972,7 +984,7 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 					contentType: null,
 					etag: null,
 					lastModified: null,
-					startedAt
+					elapsedMs
 				},
 				{
 					outcome: typedSwitch(attempt, 'kind', {
@@ -987,7 +999,7 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 		}
 
 		const { response, finalUrl } = attempt.read
-		const notModified = (stored: string | null | undefined) =>
+		const notModified = (stored: Nullable<string>) =>
 			response.status === 304 ? (stored ?? null) : null
 		const body = await readResponse({
 			...attempt.read,
@@ -1009,7 +1021,7 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 				lastModified:
 					response.headers.get('last-modified') ??
 					notModified(input.lastModified),
-				startedAt
+				elapsedMs
 			},
 			body,
 			logger
@@ -1048,13 +1060,14 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 		isHostAllowed: allowHost,
 		/** `withCrawlSnapshot` bound to the `crawlSnapshot` option. */
 		withCrawlSnapshot<T>(
-			input: CrawlSnapshotInput | null | undefined,
+			input: Nullable<CrawlSnapshotInput>,
 			run: () => Promise<T>
 		) {
 			if (!input) return run()
-			if (!options.crawlSnapshot) {
-				throw new Error('Set crawlSnapshot.root to use crawl snapshots')
-			}
+			invariant(
+				options.crawlSnapshot,
+				'Set crawlSnapshot.root to use crawl snapshots'
+			)
 			return withCrawlSnapshot(input, run, {
 				root: options.crawlSnapshot.root,
 				logger: options.crawlSnapshot.logger ?? logger

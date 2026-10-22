@@ -1,5 +1,5 @@
 import { lookup } from 'node:dns/promises'
-import { createCache } from 'hanzio'
+import { createCache, isOneOf } from 'hanzio'
 import { errorLogAttributes, type Logger, silentLogger } from './logger.js'
 
 /** One crawl hits the same host hundreds of times; DNS is not cached by Node. */
@@ -117,7 +117,7 @@ export function isBlockedAddress(address: string): boolean {
 
 export function isLocalhostHostname(hostname: string) {
 	const host = hostname.toLowerCase().replace(/^\[|\]$/g, '')
-	return host === 'localhost' || host === '127.0.0.1' || host === '::1'
+	return isOneOf(['localhost', '127.0.0.1', '::1'], host)
 }
 
 const resolutionCache = createCache({
