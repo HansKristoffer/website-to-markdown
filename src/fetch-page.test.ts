@@ -23,9 +23,8 @@ mock.module('./client.js', () => ({
 	})
 }))
 
-const { createWebsiteToMarkdown, MAX_MARKDOWN_CHARS } = await import(
-	'./fetch-page.js'
-)
+const { createWebsiteToMarkdown, MAX_MARKDOWN_CHARS } =
+	await import('./fetch-page.js')
 
 /** A fresh converter per test, so no host's pause leaks into the next. */
 function converter() {
