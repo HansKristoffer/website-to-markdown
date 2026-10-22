@@ -1,0 +1,18 @@
+{
+	"customLocalFormatters.formatters": [
+		{
+			"command": "bun fmt --no-script --stdin-filepath '${file}'",
+			"languages": ["typescript", "javascript"]
+		}
+	],
+	"[typescript]": {
+		"editor.defaultFormatter": "jkillian.custom-local-formatters"
+	},
+	"[javascript]": {
+		"editor.defaultFormatter": "jkillian.custom-local-formatters"
+	},
+	"editor.formatOnSave": true,
+	"editor.codeActionsOnSave": {
+		"source.fixAll.biome": "explicit"
+	}
+}
