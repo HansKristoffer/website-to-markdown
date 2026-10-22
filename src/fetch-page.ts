@@ -62,12 +62,7 @@ const MAX_PDF_PAGES = 60
 export const MAX_MARKDOWN_CHARS = 300_000
 
 export type FetchOutcome =
-	| 'ok'
-	| 'unchanged'
-	| 'gone'
-	| 'blocked'
-	| 'transient'
-	| 'unsupported'
+	'ok' | 'unchanged' | 'gone' | 'blocked' | 'transient' | 'unsupported'
 export type FetchSource =
 	| 'content-negotiation'
 	| 'workers-ai'
@@ -377,14 +372,10 @@ async function readOriginBody(
 				? { kind: 'bytes', bytes }
 				: { kind: 'none', captureIssue: 'document_byte_limit' }
 		},
-		...typedSwitchGroup(
-			kind,
-			TEXTUAL_KINDS,
-			async (): Promise<OriginBody> => ({
-				kind: 'text',
-				text: await response.text()
-			})
-		)
+		...typedSwitchGroup(kind, TEXTUAL_KINDS, async (): Promise<OriginBody> => ({
+			kind: 'text',
+			text: await response.text()
+		}))
 	})
 }
 
