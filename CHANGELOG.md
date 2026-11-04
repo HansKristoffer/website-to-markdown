@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.2](https://github.com/HansKristoffer/website-to-markdown/compare/v1.1.1...v1.1.2) (2026-11-04)
+
+
+### Bug Fixes
+
+* **deps:** upgrade hanzio to 3.4.0 and read robots.txt with hanzio/sitemap ([b3086d0](https://github.com/HansKristoffer/website-to-markdown/commit/b3086d0d80509b92296b739532b00cdfbe5df3f1))
+* **deps:** upgrade hanzio to 3.4.0 and read robots.txt with hanzio/sitemap ([f5098b9](https://github.com/HansKristoffer/website-to-markdown/commit/f5098b9b54202643f3345642d635716e728b77f7))
+
 ## [1.1.1](https://github.com/HansKristoffer/website-to-markdown/compare/v1.1.0...v1.1.1) (2026-10-21)
 
 
