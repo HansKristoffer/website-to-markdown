@@ -1,10 +1,5 @@
-import {
-	createCache,
-	escapeRegExp,
-	getUniqueValues,
-	isOneOf,
-	trimTrailingSlash
-} from 'hanzio'
+import { getUniqueValues, isOneOf, trimTrailingSlash } from 'hanzio'
+import { isAllowedByRobots, parseRobotsTxt } from 'hanzio/sitemap'
 import { throughCrawlSnapshot } from '../crawl-snapshot.js'
 
 const FETCH_TIMEOUT_MS = 10_000
@@ -140,52 +135,12 @@ export type RobotsRule = { allow: boolean; pattern: string }
  * the wildcard group is what the site asks of everyone. An empty `Disallow:`
  * allows everything and adds no rule.
  */
-export function parseRobotsRules(body: string) {
-	const rules: RobotsRule[] = []
-	let agents: string[] = []
-	let inRules = false
-
-	for (const raw of body.split(/\r?\n/)) {
-		const match = /^\s*([a-z-]+)\s*:\s*(.*?)\s*$/i.exec(raw.replace(/#.*$/, ''))
-		if (!match) continue
-		const field = (match[1] ?? '').toLowerCase()
-		const value = match[2] ?? ''
-
-		if (field === 'user-agent') {
-			// A user-agent line after rules opens a new group.
-			if (inRules) agents = []
-			inRules = false
-			agents.push(value.toLowerCase())
-			continue
-		}
-		if (!isOneOf(['allow', 'disallow'], field)) continue
-
-		inRules = true
-		if (agents.includes('*') && value !== '')
-			rules.push({ allow: field === 'allow', pattern: value })
-	}
-	return rules
-}
-
-/**
- * Compiled once per pattern: the crawl asks for every link of every page.
- * Every site's patterns land here, so a long-lived worker drops the least
- * recently used rather than grow.
- */
-const robotsPatternCache = createCache({ maxEntries: 5_000 })
-
-function robotsPatternRegex(pattern: string) {
-	const cached = robotsPatternCache.get<RegExp>(pattern)
-	if (cached) return cached
-
-	const anchored = pattern.endsWith('$')
-	const body = (anchored ? pattern.slice(0, -1) : pattern)
-		.split('*')
-		.map((part) => escapeRegExp(part))
-		.join('.*')
-	const regex = new RegExp(`^${body}${anchored ? '$' : ''}`)
-	robotsPatternCache.set(pattern, regex)
-	return regex
+export function parseRobotsRules(body: string): RobotsRule[] {
+	const { allow, disallow } = parseRobotsTxt(body)
+	return [
+		...allow.map((pattern) => ({ allow: true, pattern })),
+		...disallow.map((pattern) => ({ allow: false, pattern }))
+	]
 }
 
 /**
@@ -195,22 +150,13 @@ function robotsPatternRegex(pattern: string) {
  * (Good Habit audit §3.5).
  */
 export function robotsAllows(rules: RobotsRule[], url: string) {
-	let path: string
-	try {
-		const parsed = new URL(url)
-		path = parsed.pathname + parsed.search
-	} catch {
-		return true
-	}
-
-	let best: RobotsRule | null = null
-	for (const rule of rules) {
-		if (!robotsPatternRegex(rule.pattern).test(path)) continue
-		if (!best || rule.pattern.length > best.pattern.length) best = rule
-		else if (rule.pattern.length === best.pattern.length && rule.allow)
-			best = rule
-	}
-	return best?.allow ?? true
+	return isAllowedByRobots(
+		{
+			allow: rules.filter((rule) => rule.allow).map((rule) => rule.pattern),
+			disallow: rules.filter((rule) => !rule.allow).map((rule) => rule.pattern)
+		},
+		url
+	)
 }
 
 /**
