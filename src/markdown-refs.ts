@@ -32,10 +32,9 @@ export function stripFrontMatter(markdown: string) {
  * Workers AI `toMarkdown` opens every converted PDF and office file with the
  * file name as an H1, a `## Metadata` list (creation dates, uuids,
  * `PDFFormatVersion=1.7`) and a `## Contents` heading, then labels every page
- * `### Page N`. None of it is what the document says, and the fact guard
- * demanded those dates and numbers of every written document - which is how
- * Hotel Hvide Klit's terms came back as 13,000 characters of raw text with
- * the PDF metadata inside.
+ * `### Page N`. None of it is what the document says: a hotel's terms PDF
+ * came back as 13,000 characters with its creation dates and uuids inside,
+ * and a reader of the markdown takes those for facts of the document.
  */
 const DOCUMENT_TITLE_RE =
 	/^#\s+[^\n]*\.(?:pdf|docx?|xlsx?|pptx?|odt|rtf)\s*\r?\n/i
@@ -59,6 +58,94 @@ export function stripDocumentPreamble(markdown: string): string {
 		.replace(DOCUMENT_PAGE_HEADING_RE, '')
 		.replace(/\n{3,}/g, '\n\n')
 		.trim()
+}
+
+/**
+ * Cloudflare's e-mail obfuscation rewrites every address it finds into
+ * `[\[email protected\]](/cdn-cgi/l/email-protection#<hex>)`, so a converted
+ * page behind it shows no readable address at all. The hex is the address
+ * XOR-ed with its first byte; decoded only when the result is shaped like an
+ * address.
+ */
+const CF_EMAIL_LINK_RE =
+	/\[(?:[^[\]\\]|\\.|\[[^\]]*\])*\]\((?:https?:\/\/[^/)]+)?\/cdn-cgi\/l\/email-protection#([0-9a-fA-F]{8,})\)/g
+
+function decodeCloudflareEmail(hex: string) {
+	const key = Number.parseInt(hex.slice(0, 2), 16)
+	let address = ''
+	for (let index = 2; index + 1 < hex.length; index += 2) {
+		address += String.fromCharCode(
+			Number.parseInt(hex.slice(index, index + 2), 16) ^ key
+		)
+	}
+	return /^[^\s@]+@[^\s@]+\.[^\s@.]+$/.test(address) ? address : null
+}
+
+/**
+ * `<script type="application/ld+json">` survives conversion as a fenced code
+ * block on Yoast and Squarespace sites. It is never prose, and the page already
+ * carries it parsed as `jsonLd`.
+ */
+const FENCED_BLOCK_RE = /^```[^\n]*\n([\s\S]*?)^```[ \t]*$/gm
+const JSON_LD_RE = /schema\.org|["']@context["']\s*:/
+
+/** A page that inlines an SVG file gets its prolog back from the converter as text. */
+const MARKUP_DECLARATION_RE = /<\?xml[^>]*\?>|<!DOCTYPE[^>]*>/gi
+
+/**
+ * A label rendered next to its own value with no space between -
+ * `[Saleshello@example.com](mailto:hello@example.com)`,
+ * `[Support+45 22 81 82 95](tel:+4522818295)` - reads as an invented address.
+ * Matched on the value's shape, so the label's language never matters.
+ */
+const VALUE_LINK_RE = /\[([^\]]+)\]\((mailto|tel):([^)\s]+)\)/gi
+
+function emailStart(label: string, target: string) {
+	const address = (target.split('?')[0] ?? '').toLowerCase()
+	return address && label.toLowerCase().endsWith(address)
+		? label.length - address.length
+		: -1
+}
+
+function phoneStart(label: string, target: string) {
+	const digits = target.replace(/\D/g, '')
+	if (digits.length < 6) return -1
+	const first = label.search(/[+\d]/)
+	if (first < 0) return -1
+	const rest = label.slice(first)
+	return /^[+\d\s().-]+$/.test(rest) && rest.replace(/\D/g, '') === digits
+		? first
+		: -1
+}
+
+/**
+ * Removes what Cloudflare's conversion leaves behind and is never page text:
+ * obfuscated e-mail links are decoded, JSON-LD code fences and markup
+ * declarations dropped, and labels glued to their `mailto:`/`tel:` value
+ * split. Applied to every fetched page; idempotent, so markdown stored by an
+ * older version can be run through it too.
+ */
+export function cleanConvertedMarkdown(markdown: string) {
+	return markdown
+		.replace(CF_EMAIL_LINK_RE, (link, hex: string) => {
+			const address = decodeCloudflareEmail(hex)
+			return address ? `[${address}](mailto:${address})` : link
+		})
+		.replace(FENCED_BLOCK_RE, (block, body: string) =>
+			JSON_LD_RE.test(body) ? '' : block
+		)
+		.replace(MARKUP_DECLARATION_RE, '')
+		.replace(
+			VALUE_LINK_RE,
+			(link, label: string, scheme: string, target: string) => {
+				const start =
+					scheme.toLowerCase() === 'mailto'
+						? emailStart(label, target)
+						: phoneStart(label, target)
+				if (start <= 0 || !/\p{L}/u.test(label[start - 1] ?? '')) return link
+				return `[${label.slice(0, start)} ${label.slice(start)}](${scheme}:${target})`
+			}
+		)
 }
 
 export function titleFromMarkdown(markdown: string) {
@@ -96,8 +183,8 @@ function resolveTarget(target: string, baseUrl: string) {
 		if (!isOneOf(['https:', 'http:'], resolved.protocol)) return null
 		// Cloudflare's reserved prefix is plumbing, never a page: the e-mail
 		// obfuscation endpoint under it answers 410, which used to count as a
-		// page this site failed to deliver. `clean-pages.ts` decodes the address
-		// out of the link before it is dropped here.
+		// page this site failed to deliver. `cleanConvertedMarkdown` has already
+		// decoded the address out of the link.
 		if (resolved.pathname.startsWith('/cdn-cgi/')) return null
 		return resolved.href
 	} catch {

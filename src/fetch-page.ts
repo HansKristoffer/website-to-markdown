@@ -38,6 +38,7 @@ import { extractHtmlMetadata } from './html-metadata.js'
 import { type CreateConcurrencyLimit, createHostLimits } from './limit.js'
 import { errorLogAttributes, type Logger, silentLogger } from './logger.js'
 import {
+	cleanConvertedMarkdown,
 	htmlImages,
 	htmlLinks,
 	markdownRefs,
@@ -46,29 +47,38 @@ import {
 	titleFromMarkdown
 } from './markdown-refs.js'
 import { createMemoryConcurrencyLimit } from './memory-limit.js'
-import { isHostAllowed, isLocalhostHostname } from './net-guard.js'
+import {
+	type Fetch,
+	followRedirects,
+	type GuardedFetchOptions,
+	guardedFetch,
+	HostNotAllowedError,
+	isHostAllowed,
+	isLocalhostHostname
+} from './net-guard.js'
 import { currentOperationSignal } from './operation-signal.js'
+import { decodeText, readBody } from './read-body.js'
+import type { CaptureIssue, FetchOutcome, FetchSource } from './schema/index.js'
+import { asUnchanged, isUnchangedFor } from './unchanged-page.js'
 import { BROWSER_USER_AGENT } from './user-agent.js'
 import { preserveXlsxZeros } from './xlsx-zeros.js'
+
+export type { CaptureIssue, FetchOutcome, FetchSource }
 
 const FETCH_TIMEOUT_MS = 30_000
 /** Browser Rendering once returned a 6 MB markdown page from a 6 MB upload. */
 const MAX_HTML_BYTES = 2 * 1024 * 1024
+/**
+ * Read cap for a textual body. Above `MAX_HTML_BYTES` a page is not converted
+ * but still yields its metadata and links; above this it is not downloaded.
+ */
+const MAX_TEXT_READ_BYTES = 2 * MAX_HTML_BYTES
 const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
 const MAX_PDF_BYTES = 12 * 1024 * 1024
 const MAX_PDF_PAGES = 60
 
 /** Stored markdown ceiling; a page over this is a listing or an upload, not knowledge. */
 export const MAX_MARKDOWN_CHARS = 300_000
-
-export type FetchOutcome =
-	'ok' | 'unchanged' | 'gone' | 'blocked' | 'transient' | 'unsupported'
-export type FetchSource =
-	| 'content-negotiation'
-	| 'workers-ai'
-	| 'browser-rendering'
-	| 'not-modified'
-	| 'firecrawl-parse'
 
 export type FetchedPage = {
 	/** The URL we requested, after http->https upgrade and www fallback. */
@@ -90,13 +100,13 @@ export type FetchedPage = {
 	lang: string | null
 	/** <link rel="canonical">, absolute. */
 	canonical: string | null
-	/** `<link rel="alternate" hreflang>` targets, absolute, `x-default` excluded. Optional: many callers build a page from parts. */
-	alternates?: string[]
+	/** `<link rel="alternate" hreflang>` targets, absolute, `x-default` excluded. */
+	alternates: string[]
 	/** `alternates` by language: URL -> ISO 639-1 (`da` of `da-DK`). */
-	alternateLanguages?: Record<string, string>
+	alternateLanguages: Record<string, string>
 	/** <meta name="description"> or the og: equivalent. */
 	metaDescription: string | null
-	/** Parsed application/ld+json blocks (any shape; the profile layer reads LocalBusiness/OpeningHoursSpecification). */
+	/** Parsed application/ld+json blocks, any shape. */
 	jsonLd: unknown[]
 	/**
 	 * Absolute, deduped link targets: the markdown's, unioned with every
@@ -107,13 +117,14 @@ export type FetchedPage = {
 	/** Absolute, deduped image URLs found in the markdown. */
 	images: string[]
 	durationMs: number
-	captureIssue?: Nullable<string>
+	/** Why the page is incomplete or missing, when the library knows. */
+	captureIssue: CaptureIssue | null
 	/**
 	 * Hash of the HTML the origin served, when an origin tier read HTML. Given
 	 * back on the next read (`fetchPageAsMarkdown({ htmlHash })`), identical HTML
 	 * is answered as `unchanged` without converting it again.
 	 */
-	htmlHash?: Nullable<string>
+	htmlHash: string | null
 }
 
 type PageBase = {
@@ -127,12 +138,23 @@ type PageBase = {
 }
 
 export type PageBody = {
-	captureIssue?: Nullable<string>
+	captureIssue?: Nullable<CaptureIssue>
 	outcome: FetchOutcome
 	source: FetchSource | null
 	markdown?: Nullable<string>
 	/** The HTML an origin tier read, when one did - the only source of metadata. */
 	html?: Nullable<string>
+}
+
+/**
+ * A NUL byte is never text, and Postgres refuses a string that holds one: a
+ * single page with one (a Wix site's conversion) failed a whole import.
+ * Composed Unicode, because string comparisons downstream assume it: a site
+ * that wrote "Gård" as "a" plus a combining ring read as "Ga" to anything
+ * matching names in the text.
+ */
+function cleanText(text: string) {
+	return text.replaceAll('\u0000', '').normalize('NFC')
 }
 
 /**
@@ -145,21 +167,13 @@ function buildPage(
 	rawBody: PageBody,
 	logger: Logger
 ): FetchedPage {
-	// A NUL byte is never text, and Postgres refuses a string that holds one:
-	// a single page with one (a Wix site's conversion) failed the whole import.
-	// Composed Unicode, because every comparison downstream assumes it: a site
-	// that wrote "Gård" as "a" plus a combining ring gave the fact guard the
-	// name "Broges Ga", which no draft could contain, and the document shipped
-	// as its verbatim source.
-	const clean = (text: Nullable<string>) =>
-		text?.replaceAll('\u0000', '').normalize('NFC')
 	const body = {
 		...rawBody,
-		markdown: clean(rawBody.markdown),
-		html: clean(rawBody.html)
+		markdown: rawBody.markdown ? cleanText(rawBody.markdown) : null,
+		html: rawBody.html ? cleanText(rawBody.html) : null
 	}
 	const frontMatter = stripFrontMatter(body.markdown ?? '')
-	let markdown = frontMatter.markdown
+	let markdown = cleanConvertedMarkdown(frontMatter.markdown)
 	if (markdown.length > MAX_MARKDOWN_CHARS) {
 		logger.warn('url-to-markdown.truncated', {
 			url: base.finalUrl,
@@ -207,6 +221,7 @@ function buildPage(
 				? 'markdown_limit'
 				: (body.captureIssue ?? null),
 		durationMs: Math.round(base.elapsedMs()),
+		// Over the cleaned HTML, as `convertTextual` compares it.
 		htmlHash: body.html ? htmlHash(body.html) : null
 	}
 }
@@ -214,9 +229,10 @@ function buildPage(
 /**
  * `http://` is upgraded rather than rejected: two carpenter sites in the probe
  * link internally with `http://` and the https-only guard threw away most of
- * their pages. Localhost http stays reachable outside production.
+ * their pages. Localhost http stays http, and is reachable only with
+ * `allowLocalhost`.
  */
-function prepareRequestUrl(raw: string) {
+function prepareRequestUrl(raw: string, allowLocalhost: boolean) {
 	let parsed: URL
 	try {
 		parsed = new URL(raw)
@@ -226,7 +242,7 @@ function prepareRequestUrl(raw: string) {
 	if (parsed.protocol === 'https:') return parsed
 	if (parsed.protocol !== 'http:') return null
 	if (isLocalhostHostname(parsed.hostname)) {
-		return process.env.NODE_ENV === 'production' ? null : parsed
+		return allowLocalhost ? parsed : null
 	}
 	parsed.protocol = 'https:'
 	if (parsed.port === '80') parsed.port = ''
@@ -248,7 +264,7 @@ function wwwFallbackUrl(url: URL) {
 
 /**
  * A 429 is an origin asking us to slow down, not a bot wall. Shopify answered
- * 117 of Good Habit's 244 reads with it; sent on to Browser Rendering they
+ * 117 of one store's 244 reads with it; sent on to Browser Rendering they
  * tripped Cloudflare's own limit (79 times, 25-30 s each) and 7 came back.
  * So the host is narrowed and paused (`coolDownHost`), the URL is asked again,
  * and a page still refused after that is `transient`: its stored copy stands
@@ -277,7 +293,7 @@ function rateLimitWaitMs(response: Response, retry: number) {
  * matches, and every page is converted again once instead of keeping the
  * markdown the old conversion made.
  */
-const CONVERSION_VERSION = 1
+const CONVERSION_VERSION = 2
 
 function htmlHash(html: string) {
 	return sha256Hex(`${CONVERSION_VERSION}\n${html}`)
@@ -311,7 +327,7 @@ type TextualKind = ElementOf<typeof TEXTUAL_KINDS>
 
 /** What the origin gave us, already downloaded under the host's politeness slot. */
 type OriginBody =
-	| { kind: 'none'; captureIssue?: string }
+	| { kind: 'none'; captureIssue?: CaptureIssue }
 	| { kind: 'text'; text: string }
 	| { kind: 'bytes'; bytes: ArrayBuffer }
 
@@ -372,10 +388,22 @@ async function readOriginBody(
 				? { kind: 'bytes', bytes }
 				: { kind: 'none', captureIssue: 'document_byte_limit' }
 		},
-		...typedSwitchGroup(kind, TEXTUAL_KINDS, async (): Promise<OriginBody> => ({
-			kind: 'text',
-			text: await response.text()
-		}))
+		...typedSwitchGroup(kind, TEXTUAL_KINDS, async (): Promise<OriginBody> => {
+			const declared = Number(response.headers.get('content-length'))
+			const read =
+				Number.isFinite(declared) && declared > MAX_TEXT_READ_BYTES
+					? null
+					: await readBody(response, MAX_TEXT_READ_BYTES)
+			if (!read || read.truncated) {
+				if (!read) discardBody(response)
+				logger.info('url-to-markdown.html_oversized', {
+					url: finalUrl.href,
+					bytes: read ? MAX_TEXT_READ_BYTES : declared
+				})
+				return { kind: 'none', captureIssue: 'html_byte_limit' }
+			}
+			return { kind: 'text', text: decodeText(read.bytes) }
+		})
 	})
 }
 
@@ -385,43 +413,19 @@ function documentFilename(finalUrl: string, extension: string) {
 	return fileExtension(name) === extension ? name : `${name}.${extension}`
 }
 
-/** Streaming limits bound chunked bodies as well as declared Content-Length. */
-async function readBoundedBody(
-	response: Response,
-	maxBytes: number
-): Promise<ArrayBuffer | null> {
-	const reader = response.body?.getReader()
-	if (!reader) return new ArrayBuffer(0)
-	const chunks: Uint8Array[] = []
-	let size = 0
-	while (true) {
-		const next = await reader.read()
-		if (next.done) break
-		size += next.value.byteLength
-		if (size > maxBytes) {
-			await reader.cancel()
-			return null
-		}
-		chunks.push(next.value)
-	}
-	const bytes = new Uint8Array(size)
-	let offset = 0
-	for (const chunk of chunks) {
-		bytes.set(chunk, offset)
-		offset += chunk.byteLength
-	}
-	return bytes.buffer
+async function readBoundedBody(response: Response, maxBytes: number) {
+	const read = await readBody(response, maxBytes)
+	return read.truncated ? null : read.bytes.buffer
 }
 
 /**
  * Markup a visitor never sees until they open it: `<template>` content and
  * closed `<dialog>`s. A Shopify theme ships its cart drawer ("Your cart is
  * empty") and search overlay (a product list with prices) in every page this
- * way; converted, they reached 70 of one store's 89 pages and a price table
- * in seven of its documents (Good Habit audit §3.4). An open dialog is shown
- * and stays. A contact or newsletter form (Shopify posts both to `/contact`)
- * is labels and a button, and "Telefon Kommentar Send us a note" read as the
- * name `Kommentar Send` the fact guard then demanded of the document.
+ * way; converted, they reached 70 of one store's 89 pages. An open dialog is
+ * shown and stays. A contact or newsletter form (Shopify posts both to
+ * `/contact`) is labels and a button, and "Telefon Kommentar Send us a note"
+ * read as if `Kommentar Send` were a name on the page.
  *
  * Plus the form fields a visitor cannot see: an anti-spam honeypot inside a
  * `display:none` block renamed its label ("Navn" / "Url") on every request,
@@ -459,9 +463,9 @@ export type FetchPageInput = {
 	render?: boolean | undefined
 	/**
 	 * ISO country of the market to read the page in. A Shopify store redirects
-	 * by the visitor's IP - our worker reads a Danish shop as its EU market in
-	 * euros and English (Good Habit audit §3.2) - and `?country=DK` pins it.
-	 * Applied to the request only: the page keeps the URL it was asked for.
+	 * by the visitor's IP - a worker abroad reads a Danish shop as its EU market
+	 * in euros and English - and `?country=DK` pins it. Applied to the request
+	 * only: the page keeps the URL it was asked for.
 	 */
 	country?: Nullable<string>
 	/** The last read's `htmlHash`; identical HTML comes back `unchanged`. */
@@ -504,10 +508,17 @@ export type WebsiteToMarkdownOptions = {
 	/** The OCR tier for a PDF Workers AI returned nothing for. */
 	parsePdf?: PdfParser
 	/**
-	 * SSRF guard run before every origin request. Defaults to
-	 * {@link isHostAllowed}: public addresses only, localhost outside production.
+	 * SSRF guard run before every origin request and every redirect it
+	 * follows. Defaults to {@link isHostAllowed}: public addresses only.
 	 */
 	isHostAllowed?: (hostname: string) => Promise<boolean>
+	/**
+	 * Let the default guard and `http://` through to `localhost`, `127.0.0.1`
+	 * and `::1`, e.g. outside production for a dev server. Default false.
+	 */
+	allowLocalhost?: boolean
+	/** The `fetch` origin requests go through, behind the guard. Default the global. */
+	fetch?: Fetch
 }
 
 /**
@@ -525,9 +536,11 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 		logger
 	})
 	const hostLimits = createHostLimits(createLimit)
+	const allowLocalhost = options.allowLocalhost === true
 	const allowHost =
 		options.isHostAllowed ??
-		((hostname: string) => isHostAllowed(hostname, logger))
+		((hostname: string) => isHostAllowed(hostname, { logger, allowLocalhost }))
+	const guard = { isHostAllowed: allowHost, fetch: options.fetch }
 
 	async function requestOrigin(
 		url: URL,
@@ -535,9 +548,6 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 		signal?: AbortSignal | undefined
 	): Promise<OriginAttempt> {
 		if (signal?.aborted) return { kind: 'failed', retryable: false }
-		if (!(await allowHost(url.hostname))) {
-			return { kind: 'refused' }
-		}
 		try {
 			// The politeness slot spans the connection *and* the body: freed at the
 			// response headers it would bound connections only, and the whole 80-wide
@@ -547,12 +557,13 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 			// our upstreams with their own pools, and holding a customer's slot
 			// across a 60s render would stall the crawl for no politeness gain.
 			const read = await hostLimits.withHostLimit(url.hostname, async () => {
-				const response = await fetch(url, {
-					redirect: 'follow',
-					signal: timeoutSignal(FETCH_TIMEOUT_MS, signal),
-					headers
-				})
-				const finalUrl = parseFinalUrl(response.url, url)
+				const hop = await followRedirects(
+					url,
+					{ signal: timeoutSignal(FETCH_TIMEOUT_MS, signal), headers },
+					guard
+				)
+				const response = hop.response
+				const finalUrl = parseFinalUrl(response.url, hop.url)
 				return {
 					response,
 					finalUrl,
@@ -561,6 +572,8 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 			})
 			return { kind: 'read', read }
 		} catch (error) {
+			// The guard refused the URL or a redirect: policy, not a network blip.
+			if (error instanceof HostNotAllowedError) return { kind: 'refused' }
 			logger.warn('url-to-markdown.origin_failed', {
 				url: url.href,
 				...errorLogAttributes(error)
@@ -705,7 +718,11 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 		const html = isHtml ? body : null
 		// Most origins send no validators, so without this every page of a quiet
 		// site went through Workers AI again every night to learn nothing moved.
-		if (html && input.htmlHash && htmlHash(html) === input.htmlHash) {
+		if (
+			html &&
+			input.htmlHash &&
+			htmlHash(cleanText(html)) === input.htmlHash
+		) {
 			return { outcome: 'unchanged', source: 'not-modified' }
 		}
 		if (html && Buffer.byteLength(html) > MAX_HTML_BYTES) {
@@ -716,11 +733,17 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 				url: input.finalUrl.href,
 				bytes: Buffer.byteLength(html)
 			})
-			return { outcome: 'unsupported', source: null, html }
+			return {
+				outcome: 'unsupported',
+				source: null,
+				html,
+				captureIssue: 'html_byte_limit'
+			}
 		}
 
 		let shell = false
 		let workersAiRateLimited = false
+		let renderRateLimited = false
 		if (html) {
 			const visible = withoutHiddenUi(html)
 			let converted: string | null = null
@@ -758,7 +781,7 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 				)
 			} catch (error) {
 				if (!(error instanceof CloudflareRateLimitedError)) throw error
-				workersAiRateLimited = true
+				renderRateLimited = true
 			}
 			if (
 				rendered &&
@@ -781,7 +804,9 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 				? 'render_incomplete'
 				: workersAiRateLimited
 					? 'workers_ai_rate_limited'
-					: null
+					: renderRateLimited
+						? 'browser_rendering_rate_limited'
+						: null
 		}
 	}
 
@@ -809,10 +834,21 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 			if (!input.render || !isOneOf(BOT_WALL_STATUSES, status)) {
 				return { outcome: 'blocked', source: null }
 			}
-			const rendered = await client.renderUrlToMarkdown(
-				input.finalUrl.href,
-				input.signal
-			)
+			let rendered: string | null
+			try {
+				rendered = await client.renderUrlToMarkdown(
+					input.finalUrl.href,
+					input.signal
+				)
+			} catch (error) {
+				if (!(error instanceof CloudflareRateLimitedError)) throw error
+				// The wall may well let a browser through on the next run.
+				return {
+					outcome: 'transient',
+					source: null,
+					captureIssue: 'browser_rendering_rate_limited'
+				}
+			}
 			return rendered
 				? { outcome: 'ok', source: 'browser-rendering', markdown: rendered }
 				: { outcome: 'blocked', source: null }
@@ -844,7 +880,11 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 								htmlHash: input.htmlHash,
 								signal: input.signal
 							})
-						: { outcome: 'unsupported', source: null }
+						: {
+								outcome: 'unsupported',
+								source: null,
+								captureIssue: body.kind === 'none' ? body.captureIssue : null
+							}
 			)
 		})
 	}
@@ -856,12 +896,39 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 	 * target, validators, HTML metadata and absolute links.
 	 *
 	 * Never throws: a page that cannot be read is an outcome, not an exception,
-	 * because the caller is crawling hundreds of URLs at a time. A knowledge bench
-	 * run reads through its crawl snapshot (`crawl-snapshot.ts`).
+	 * because the caller is crawling hundreds of URLs at a time. Anything
+	 * unexpected (a failing shared limiter, a corrupt snapshot) is logged and
+	 * comes back `transient`. Inside `withCrawlSnapshot` it reads through the
+	 * snapshot.
 	 */
 	async function fetchPageAsMarkdown(
 		input: FetchPageInput
 	): Promise<FetchedPage> {
+		const elapsedMs = startTimer()
+		try {
+			return await readPage(input)
+		} catch (error) {
+			logger.warn('url-to-markdown.failed', {
+				url: input.url,
+				...errorLogAttributes(error)
+			})
+			return buildPage(
+				{
+					url: input.url,
+					finalUrl: input.url,
+					status: 0,
+					contentType: null,
+					etag: null,
+					lastModified: null,
+					elapsedMs
+				},
+				{ outcome: 'transient', source: null },
+				logger
+			)
+		}
+	}
+
+	async function readPage(input: FetchPageInput): Promise<FetchedPage> {
 		if (!currentCrawlSnapshot()) return fetchPageLive(input)
 
 		// The snapshot holds the whole page, read without validators; whether it is
@@ -876,29 +943,7 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 					signal: input.signal
 				})
 		)
-		const unchanged =
-			page.outcome === 'ok' &&
-			((input.htmlHash && page.htmlHash === input.htmlHash) ||
-				(input.etag && page.etag === input.etag))
-		if (!unchanged) return page
-
-		return {
-			...page,
-			outcome: 'unchanged',
-			source: 'not-modified',
-			markdown: '',
-			title: null,
-			lang: null,
-			canonical: null,
-			alternates: [],
-			alternateLanguages: {},
-			metaDescription: null,
-			jsonLd: [],
-			links: [],
-			images: [],
-			captureIssue: null,
-			htmlHash: null
-		}
+		return isUnchangedFor(page, input) ? asUnchanged(page) : page
 	}
 
 	async function fetchPageLive(input: FetchPageInput): Promise<FetchedPage> {
@@ -906,7 +951,7 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 		const elapsedMs = startTimer()
 		const render = input.render ?? true
 
-		const prepared = prepareRequestUrl(input.url)
+		const prepared = prepareRequestUrl(input.url, allowLocalhost)
 		if (!prepared) {
 			return buildPage(
 				{
@@ -1049,6 +1094,18 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 		renderUrlToMarkdown: client.renderUrlToMarkdown,
 		/** The SSRF guard the converter runs, bound to its `logger`. */
 		isHostAllowed: allowHost,
+		/**
+		 * `fetch` behind the converter's guard, run on the URL and on every
+		 * redirect. Throws `HostNotAllowedError` when one is refused. Use it for
+		 * any other request to a customer-supplied URL.
+		 */
+		guardedFetch(
+			input: string | URL,
+			init?: RequestInit,
+			fetchOptions?: Pick<GuardedFetchOptions, 'maxRedirects'>
+		) {
+			return guardedFetch(input, init, { ...guard, ...fetchOptions })
+		},
 		/** `withCrawlSnapshot` bound to the `crawlSnapshot` option. */
 		withCrawlSnapshot<T>(
 			input: Nullable<CrawlSnapshotInput>,

@@ -17,6 +17,7 @@ export {
 	withCrawlSnapshot
 } from './crawl-snapshot.js'
 export {
+	type CaptureIssue,
 	createWebsiteToMarkdown,
 	type FetchedPage,
 	type FetchOutcome,
@@ -38,6 +39,7 @@ export {
 } from './limit.js'
 export type { LogAttributes, Logger } from './logger.js'
 export {
+	cleanConvertedMarkdown,
 	htmlImages,
 	htmlLinks,
 	markdownRefs,
@@ -47,6 +49,11 @@ export {
 } from './markdown-refs.js'
 export { createMemoryConcurrencyLimit } from './memory-limit.js'
 export {
+	type Fetch,
+	type GuardedFetchOptions,
+	guardedFetch,
+	type HostGuardOptions,
+	HostNotAllowedError,
 	isBlockedAddress,
 	isHostAllowed,
 	isLocalhostHostname

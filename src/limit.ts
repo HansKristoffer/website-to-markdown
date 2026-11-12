@@ -90,7 +90,7 @@ export const URL_TO_MARKDOWN_HOST_MAX_CONCURRENCY = 16
 
 /**
  * A host that answered 429 is read this narrowly from then on. At 16 in
- * flight Shopify refused 117 of Good Habit's 244 reads even after each had
+ * flight Shopify refused 117 of one store's 244 reads even after each had
  * waited out its pause: the pause only delayed the next burst. Calibration
  * knobs - set them from the crawl log's `rate_limited`, not by theory.
  */

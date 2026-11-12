@@ -125,25 +125,42 @@ const resolutionCache = createCache({
 	maxEntries: RESOLUTION_CACHE_MAX
 })
 
+export type HostGuardOptions = {
+	logger?: Logger | undefined
+	/** Allow `localhost`, `127.0.0.1` and `::1`, e.g. for a dev server. Default false. */
+	allowLocalhost?: boolean | undefined
+}
+
 /**
  * SSRF guard: a customer can put any hostname in the website field, and an
  * internal address behind it would turn the importer into a proxy for our own
- * network. Localhost stays reachable outside production for the dev server.
+ * network. An IP literal (`[fd00::1]` included) is judged as written, without
+ * a DNS lookup.
  */
 export async function isHostAllowed(
 	hostname: string,
-	logger: Logger = silentLogger
+	options: HostGuardOptions = {}
 ) {
-	if (isLocalhostHostname(hostname)) {
-		return process.env.NODE_ENV !== 'production'
+	const logger = options.logger ?? silentLogger
+	const host = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+	if (isLocalhostHostname(host)) return options.allowLocalhost === true
+
+	// `dns.lookup` fails on a bracketed literal, and a failed lookup is let
+	// through below, so a literal never reaches it.
+	if (parseIpv4(host) || host.includes(':')) {
+		const allowed = !isBlockedAddress(host)
+		if (!allowed) {
+			logger.warn('net-guard.blocked_address', { hostname, addresses: host })
+		}
+		return allowed
 	}
 
-	const cached = resolutionCache.get<boolean>(hostname)
+	const cached = resolutionCache.get<boolean>(host)
 	if (cached !== undefined) return cached
 
 	let allowed = false
 	try {
-		const addresses = await lookup(hostname, { all: true })
+		const addresses = await lookup(host, { all: true })
 		allowed =
 			addresses.length > 0 &&
 			addresses.every((entry) => !isBlockedAddress(entry.address))
@@ -163,6 +180,101 @@ export async function isHostAllowed(
 		return true
 	}
 
-	resolutionCache.set(hostname, allowed)
+	resolutionCache.set(host, allowed)
 	return allowed
+}
+
+/** The `fetch` shape the guard wraps and the library accepts as an option. */
+export type Fetch = (
+	input: string | URL,
+	init?: RequestInit
+) => Promise<Response>
+
+/** A request, or one of its redirects, went to a host the guard refuses. */
+export class HostNotAllowedError extends Error {
+	override readonly name = 'HostNotAllowedError'
+
+	constructor(readonly url: string) {
+		super(`Host not allowed: ${url}`)
+	}
+}
+
+export type GuardedFetchOptions = {
+	/** Run on the URL and on every redirect target. Default {@link isHostAllowed}. */
+	isHostAllowed?: ((hostname: string) => Promise<boolean>) | undefined
+	/** Default `globalThis.fetch`, read at call time. */
+	fetch?: Fetch | undefined
+	/** Default 10. */
+	maxRedirects?: number | undefined
+}
+
+const REDIRECT_STATUSES = [301, 302, 303, 307, 308] as const
+const DEFAULT_MAX_REDIRECTS = 10
+
+/**
+ * `fetch` that runs the guard on every hop: `redirect: 'follow'` would take a
+ * public host's 302 to `http://169.254.169.254/` without asking. Returns the
+ * last response and the URL it came from.
+ */
+export async function followRedirects(
+	input: string | URL,
+	init: RequestInit = {},
+	options: GuardedFetchOptions = {}
+): Promise<{ response: Response; url: URL }> {
+	const allow =
+		options.isHostAllowed ?? ((hostname: string) => isHostAllowed(hostname))
+	const maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS
+	const follow = (init.redirect ?? 'follow') === 'follow'
+	let url = new URL(input)
+	let request: RequestInit = follow ? { ...init, redirect: 'manual' } : init
+
+	for (let hop = 0; ; hop++) {
+		if (
+			!isOneOf(['http:', 'https:'], url.protocol) ||
+			!(await allow(url.hostname))
+		) {
+			throw new HostNotAllowedError(url.href)
+		}
+		const response = await (options.fetch ?? globalThis.fetch)(url, request)
+		const location = response.headers.get('location')
+		if (!follow || !location || !isOneOf(REDIRECT_STATUSES, response.status)) {
+			return { response, url }
+		}
+		void response.body?.cancel().catch(() => {})
+		if (hop >= maxRedirects) {
+			throw new TypeError(`Too many redirects from ${String(input)}`)
+		}
+
+		const next = new URL(location, url)
+		// What `fetch` itself does on a redirect: credentials stay with their
+		// origin, and a 303 (or a POST answered with 301/302) becomes a GET.
+		if (next.origin !== url.origin) {
+			const headers = new Headers(request.headers)
+			headers.delete('authorization')
+			headers.delete('cookie')
+			request = { ...request, headers }
+		}
+		const method = (request.method ?? 'GET').toUpperCase()
+		if (
+			(response.status === 303 && !isOneOf(['GET', 'HEAD'], method)) ||
+			(isOneOf([301, 302], response.status) && method === 'POST')
+		) {
+			const headers = new Headers(request.headers)
+			headers.delete('content-type')
+			request = { ...request, method: 'GET', body: null, headers }
+		}
+		url = next
+	}
+}
+
+/**
+ * {@link followRedirects} as a drop-in `fetch`. Throws
+ * {@link HostNotAllowedError} when the URL or a redirect is refused.
+ */
+export async function guardedFetch(
+	input: string | URL,
+	init?: RequestInit,
+	options?: GuardedFetchOptions
+): Promise<Response> {
+	return (await followRedirects(input, init, options)).response
 }
