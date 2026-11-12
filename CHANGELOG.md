@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.0.0](https://github.com/HansKristoffer/website-to-markdown/compare/v1.1.1...v2.0.0) (2026-11-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* localhost is refused unless `allowLocalhost: true` is passed (1.x allowed it whenever NODE_ENV was not production), and `isHostAllowed(hostname, logger)` is `isHostAllowed(hostname, { logger, allowLocalhost })`. `FetchedPage.alternates`, `alternateLanguages`, `captureIssue` and `htmlHash` are required, and `captureIssue` is the `CaptureIssue` union. A Browser Rendering 429 is reported as `browser_rendering_rate_limited` instead of `workers_ai_rate_limited`. The conversion version is bumped, so every page is converted once more after the upgrade.
+
+### Features
+
+* guard every redirect, bound every body, and never throw from fetchPageAsMarkdown ([4f4edda](https://github.com/HansKristoffer/website-to-markdown/commit/4f4edda6a0c26e490917980b5b65695d825fb854))
+
+
+### Bug Fixes
+
+* **deps:** upgrade hanzio to 3.4.0 and read robots.txt with hanzio/sitemap ([b3086d0](https://github.com/HansKristoffer/website-to-markdown/commit/b3086d0d80509b92296b739532b00cdfbe5df3f1))
+* **deps:** upgrade hanzio to 3.4.0 and read robots.txt with hanzio/sitemap ([f5098b9](https://github.com/HansKristoffer/website-to-markdown/commit/f5098b9b54202643f3345642d635716e728b77f7))
+
 ## [1.1.1](https://github.com/HansKristoffer/website-to-markdown/compare/v1.1.0...v1.1.1) (2026-10-21)
 
 
