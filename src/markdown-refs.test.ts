@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+	cleanConvertedMarkdown,
 	htmlLinks,
 	markdownRefs,
 	stripDocumentPreamble,
@@ -223,4 +224,59 @@ test('Cloudflare plumbing is never a page to crawl', () => {
 			'https://lasauna.dk/'
 		)
 	).toEqual(['https://lasauna.dk/kontakt'])
+})
+
+/** What Cloudflare's e-mail obfuscation writes for `address`. */
+function obfuscated(address: string, key = 0x5a) {
+	const hex = (byte: number) => byte.toString(16).padStart(2, '0')
+	return (
+		hex(key) +
+		[...address].map((char) => hex(char.charCodeAt(0) ^ key)).join('')
+	)
+}
+
+describe('cleanConvertedMarkdown', () => {
+	test('decodes Cloudflare-obfuscated e-mail links', () => {
+		const link = `[\\[email protected\\]](/cdn-cgi/l/email-protection#${obfuscated('info@lasauna.dk')})`
+		expect(cleanConvertedMarkdown(`Skriv til ${link} i dag`)).toBe(
+			'Skriv til [info@lasauna.dk](mailto:info@lasauna.dk) i dag'
+		)
+	})
+
+	test('leaves a fragment that does not decode to an address alone', () => {
+		const link = `[x](/cdn-cgi/l/email-protection#${obfuscated('not an address')})`
+		expect(cleanConvertedMarkdown(link)).toBe(link)
+	})
+
+	test('drops JSON-LD fences and markup declarations, keeps other code', () => {
+		const markdown = [
+			'## Vi er lukket',
+			'```json\n{"@context":"https://schema.org","@type":"LocalBusiness"}\n```',
+			'<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE svg>',
+			'```js\nconsole.log(1)\n```'
+		].join('\n\n')
+		const cleaned = cleanConvertedMarkdown(markdown)
+		expect(cleaned).not.toContain('schema.org')
+		expect(cleaned).not.toContain('<?xml')
+		expect(cleaned).not.toContain('DOCTYPE')
+		expect(cleaned).toContain('console.log(1)')
+		expect(cleaned).toContain('## Vi er lukket')
+	})
+
+	test('splits a label glued to its own mailto or tel value', () => {
+		expect(
+			cleanConvertedMarkdown(
+				'[Saleshello@example.com](mailto:hello@example.com) [Support+45 22 81 82 95](tel:+4522818295) [Ring 12](tel:12)'
+			)
+		).toBe(
+			'[Sales hello@example.com](mailto:hello@example.com) [Support +45 22 81 82 95](tel:+4522818295) [Ring 12](tel:12)'
+		)
+	})
+
+	test('is idempotent', () => {
+		const once = cleanConvertedMarkdown(
+			'[Saleshello@example.com](mailto:hello@example.com)'
+		)
+		expect(cleanConvertedMarkdown(once)).toBe(once)
+	})
 })

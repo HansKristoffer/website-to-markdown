@@ -63,7 +63,9 @@ export const cli = defineCli({
 				cloudflare: {
 					apiToken: CLOUDFLARE_API_TOKEN,
 					accountId: CLOUDFLARE_ACCOUNT_ID
-				}
+				},
+				// Run by a person on their own machine, so a dev server is fair game.
+				allowLocalhost: true
 			})
 
 			ctx.stderr.write(`Fetching ${url}…\n`)

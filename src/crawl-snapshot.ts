@@ -82,7 +82,9 @@ export async function throughCrawlSnapshot<T>(
 	const file = resolve(active.directory, `${sha256Hex(key).slice(0, 32)}.json`)
 	if (active.mode === 'replay') {
 		const stored = await readFile(file, 'utf8').catch(() => null)
-		if (stored !== null) return (JSON.parse(stored) as { value: T }).value
+		// A file cut short by a killed recording is a miss, not a crash.
+		const parsed = stored === null ? null : parseStored<T>(stored)
+		if (parsed) return parsed.value
 		active.logger?.warn('crawl-snapshot.miss', { key })
 	}
 
@@ -90,6 +92,14 @@ export async function throughCrawlSnapshot<T>(
 	await mkdir(active.directory, { recursive: true })
 	await writeFile(file, JSON.stringify({ key, value }))
 	return value
+}
+
+function parseStored<T>(stored: string) {
+	try {
+		return JSON.parse(stored) as { value: T }
+	} catch {
+		return null
+	}
 }
 
 /** The snapshot this job reads or writes, to hand on to the job it queues. */

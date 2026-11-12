@@ -12,7 +12,7 @@ const renderUrlToMarkdown = mock<Tier<string>>(async () => null)
 const parsePdf = mock<PdfParser>(async () => {
 	throw new Error('PDF extraction unavailable')
 })
-const isHostAllowed = mock(async () => true)
+const isHostAllowed = mock(async (_hostname: string) => true)
 
 mock.module('./client.js', () => ({
 	CloudflareRateLimitedError,
@@ -728,6 +728,176 @@ describe('fetchPageAsMarkdown', () => {
 		const page = await fetchPageAsMarkdown({ url: 'https://cerix.dk/priser' })
 
 		expect(page.markdown.length).toBe(MAX_MARKDOWN_CHARS)
+	})
+
+	test('HTML that cleaning changes is still unchanged on the next read', async () => {
+		// "Gård" written as "a" plus a combining ring: the hash handed back is
+		// of the composed HTML, so the comparison must be too.
+		mockFetch(() => html(DANISH_PAGE.replace('Tømrer</h1>', 'Ga\u030Ard</h1>')))
+		convertHtmlWithWorkersAi.mockResolvedValue('# Gård')
+		const { fetchPageAsMarkdown } = converter()
+
+		const first = await fetchPageAsMarkdown({ url: 'https://tomrer.dk/' })
+		convertHtmlWithWorkersAi.mockClear()
+		const second = await fetchPageAsMarkdown({
+			url: 'https://tomrer.dk/',
+			htmlHash: first.htmlHash
+		})
+
+		expect(second.outcome).toBe('unchanged')
+		expect(convertHtmlWithWorkersAi).not.toHaveBeenCalled()
+	})
+
+	test('a bot wall Browser Rendering is rate limited for is transient, not a throw', async () => {
+		mockFetch(() => new Response('denied', { status: 403 }))
+		renderUrlToMarkdown.mockRejectedValue(
+			new CloudflareRateLimitedError('browser-rendering', 4)
+		)
+		const { fetchPageAsMarkdown } = converter()
+		const page = await fetchPageAsMarkdown({ url: 'https://khtf.dk/login' })
+
+		expect(page.outcome).toBe('transient')
+		expect(page.captureIssue).toBe('browser_rendering_rate_limited')
+	})
+
+	test('a rate-limited render fallback says Browser Rendering, not Workers AI', async () => {
+		mockFetch(() => html('<html><div id="app"></div></html>'))
+		renderUrlToMarkdown.mockRejectedValue(
+			new CloudflareRateLimitedError('browser-rendering', 4)
+		)
+		const { fetchPageAsMarkdown } = converter()
+		const page = await fetchPageAsMarkdown({ url: 'https://khtf.dk/app' })
+
+		expect(page.outcome).toBe('transient')
+		expect(page.captureIssue).toBe('browser_rendering_rate_limited')
+	})
+
+	test('anything unexpected comes back transient instead of rejecting', async () => {
+		mockFetch(() => new Response('denied', { status: 401 }))
+		renderUrlToMarkdown.mockRejectedValue(new Error('SDK exploded'))
+		const { fetchPageAsMarkdown } = converter()
+		const page = await fetchPageAsMarkdown({ url: 'https://khtf.dk/admin' })
+
+		expect(page.outcome).toBe('transient')
+		expect(page.status).toBe(0)
+	})
+
+	test('a redirect to a refused host is blocked and never requested', async () => {
+		mockFetch((url) =>
+			url.startsWith('https://khtf.dk')
+				? new Response(null, {
+						status: 302,
+						headers: { location: 'http://169.254.169.254/latest/meta-data' }
+					})
+				: new Response('secret')
+		)
+		isHostAllowed.mockImplementation(
+			async (hostname: string) => hostname === 'khtf.dk'
+		)
+		const { fetchPageAsMarkdown } = converter()
+		const page = await fetchPageAsMarkdown({ url: 'https://khtf.dk/' })
+
+		expect(page.outcome).toBe('blocked')
+		expect(fetchCalls.map((call) => call.url)).toEqual(['https://khtf.dk/'])
+	})
+
+	test('follows an allowed redirect and resolves refs against where it ended', async () => {
+		mockFetch((url) =>
+			url === 'https://dentist.dk/om-os'
+				? new Response(null, {
+						status: 301,
+						headers: { location: 'https://www.dentist.dk/da/om-os' }
+					})
+				: new Response('[Priser](/priser)', {
+						status: 200,
+						headers: { 'content-type': 'text/markdown' }
+					})
+		)
+		const { fetchPageAsMarkdown } = converter()
+		const page = await fetchPageAsMarkdown({ url: 'https://dentist.dk/om-os' })
+
+		expect(page.status).toBe(200)
+		expect(page.finalUrl).toBe('https://www.dentist.dk/da/om-os')
+		expect(page.links).toEqual(['https://www.dentist.dk/priser'])
+	})
+
+	test('does not download a text body past the read cap', async () => {
+		let pulled = 0
+		const endless = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				pulled++
+				controller.enqueue(new Uint8Array(1024 * 1024).fill(120))
+			}
+		})
+		mockFetch(
+			() =>
+				new Response(endless, {
+					headers: { 'content-type': 'text/html' }
+				})
+		)
+		const { fetchPageAsMarkdown } = converter()
+		const page = await fetchPageAsMarkdown({ url: 'https://kirohuset.dk/feed' })
+
+		expect(page.outcome).toBe('unsupported')
+		expect(page.captureIssue).toBe('html_byte_limit')
+		expect(pulled).toBeLessThan(10)
+	})
+
+	test('refuses a declared oversized text body at the headers', async () => {
+		mockFetch(
+			() =>
+				new Response('<html></html>', {
+					headers: {
+						'content-type': 'text/html',
+						'content-length': String(50 * 1024 * 1024)
+					}
+				})
+		)
+		const { fetchPageAsMarkdown } = converter()
+		const page = await fetchPageAsMarkdown({ url: 'https://kirohuset.dk/big' })
+
+		expect(page.outcome).toBe('unsupported')
+		expect(page.captureIssue).toBe('html_byte_limit')
+	})
+
+	test('decodes Cloudflare-obfuscated e-mail in the page', async () => {
+		mockFetch(() => html(DANISH_PAGE))
+		// "a@b.dk" XOR-ed with 0x10.
+		convertHtmlWithWorkersAi.mockResolvedValue(
+			'Mail: [\\[email protected\\]](/cdn-cgi/l/email-protection#107150723e747b)'
+		)
+		const { fetchPageAsMarkdown } = converter()
+		const page = await fetchPageAsMarkdown({ url: 'https://lasauna.dk/' })
+
+		expect(page.markdown).toBe('Mail: [a@b.dk](mailto:a@b.dk)')
+	})
+
+	test('reads http localhost only with allowLocalhost', async () => {
+		mockFetch(
+			() =>
+				new Response('# Dev', {
+					status: 200,
+					headers: { 'content-type': 'text/markdown' }
+				})
+		)
+		const strict = createWebsiteToMarkdown({
+			cloudflare: { apiToken: 'token', accountId: 'account' }
+		})
+		const dev = createWebsiteToMarkdown({
+			cloudflare: { apiToken: 'token', accountId: 'account' },
+			allowLocalhost: true
+		})
+
+		expect(
+			(await strict.fetchPageAsMarkdown({ url: 'http://localhost:3000/' }))
+				.outcome
+		).toBe('unsupported')
+		expect(
+			(await dev.fetchPageAsMarkdown({ url: 'http://localhost:3000/' })).outcome
+		).toBe('ok')
+		expect(fetchCalls.map((call) => call.url)).toEqual([
+			'http://localhost:3000/'
+		])
 	})
 
 	test('treats an unusable URL as unsupported instead of throwing', async () => {

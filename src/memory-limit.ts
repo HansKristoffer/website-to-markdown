@@ -7,7 +7,7 @@ const START_WINDOW_MS = 1_000
  * starts in any second, and a `tripCooldown` pause before the next start.
  *
  * ponytail: per-process only. Several processes sharing one Cloudflare quota
- * need a shared limiter (hellu passes its Redis Lua limiter).
+ * need a shared limiter, e.g. `hanzio/redis`'s `createRedisConcurrencyLimit`.
  */
 export function createMemoryConcurrencyLimit(
 	options: ConcurrencyLimitOptions

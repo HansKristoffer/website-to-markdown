@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, mock, test } from 'bun:test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -8,6 +8,8 @@ import {
 	withCrawlSnapshot as withSnapshotUnder
 } from './crawl-snapshot.js'
 import { createWebsiteToMarkdown } from './fetch-page.js'
+import { sha256Hex } from './hash.js'
+import { fakePage } from './testing/index.js'
 
 const name = `unit-test-${process.pid}/example.test`
 const root = await mkdtemp(join(tmpdir(), 'crawl-snapshot-'))
@@ -53,38 +55,42 @@ describe('crawl snapshot', () => {
 	})
 
 	test('a page whose stored HTML matches the last run replays as unchanged', async () => {
-		const page = {
+		const page = fakePage({
 			url: 'https://example.test/',
-			finalUrl: 'https://example.test/',
-			status: 200,
-			outcome: 'ok',
-			source: 'workers-ai',
-			contentType: 'text/html',
-			etag: null,
-			lastModified: null,
 			markdown: '# Hello',
 			title: 'Hello',
-			lang: 'da',
-			canonical: null,
-			metaDescription: null,
-			jsonLd: [],
-			links: [],
-			images: [],
-			durationMs: 1,
+			lastModified: 'Tue, 03 Nov 2026 08:00:00 GMT',
 			htmlHash: 'hash-1'
-		}
+		})
 		await withCrawlSnapshot({ mode: 'record', name }, () =>
 			throughCrawlSnapshot('page https://example.test/  true', async () => page)
 		)
 
-		const replay = (htmlHash: string | null) =>
+		const replay = (input: { htmlHash?: string; lastModified?: string }) =>
 			withCrawlSnapshot({ mode: 'replay', name }, () =>
-				fetchPageAsMarkdown({ url: 'https://example.test/', htmlHash })
+				fetchPageAsMarkdown({ url: 'https://example.test/', ...input })
 			)
 
-		expect((await replay(null)).markdown).toBe('# Hello')
-		expect((await replay('hash-1')).outcome).toBe('unchanged')
-		expect((await replay('hash-0')).outcome).toBe('ok')
+		expect((await replay({})).markdown).toBe('# Hello')
+		expect((await replay({ htmlHash: 'hash-1' })).outcome).toBe('unchanged')
+		expect((await replay({ htmlHash: 'hash-0' })).outcome).toBe('ok')
+		expect(
+			(await replay({ lastModified: 'Tue, 03 Nov 2026 08:00:00 GMT' })).outcome
+		).toBe('unchanged')
+	})
+
+	test('a stored file cut short is a miss, not a crash', async () => {
+		const key = 'text truncated'
+		const directory = join(root, name)
+		await mkdir(directory, { recursive: true })
+		await writeFile(
+			join(directory, `${sha256Hex(key).slice(0, 32)}.json`),
+			'{"key":"text trunc'
+		)
+		const replayed = await withCrawlSnapshot({ mode: 'replay', name }, () =>
+			throughCrawlSnapshot(key, async () => 'live again')
+		)
+		expect(replayed).toBe('live again')
 	})
 
 	test('a name that would leave the snapshot directory is refused', () => {

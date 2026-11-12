@@ -1,10 +1,31 @@
 import { getUniqueValues, isOneOf, trimTrailingSlash } from 'hanzio'
 import { isAllowedByRobots, parseRobotsTxt } from 'hanzio/sitemap'
 import { throughCrawlSnapshot } from '../crawl-snapshot.js'
+import { type Fetch, guardedFetch } from '../net-guard.js'
+import { decodeText, readBody } from '../read-body.js'
+import { BROWSER_USER_AGENT } from '../user-agent.js'
+
+export type { Fetch }
 
 const FETCH_TIMEOUT_MS = 10_000
 const MAX_SITEMAP_FILES = 20
 const MAX_URLS = 20_000
+/** Google reads the first 500 KiB of a robots.txt and ignores the rest. */
+const MAX_ROBOTS_BYTES = 500 * 1024
+/**
+ * Read cap per sitemap file. 20,000 URLs fit in a few MB; a longer file is
+ * read up to here and its complete entries used.
+ */
+const MAX_SITEMAP_BYTES = 10 * 1024 * 1024
+
+export type SitemapOptions = {
+	/**
+	 * The `fetch` robots.txt and sitemaps go through. Default
+	 * {@link guardedFetch} with the default guard (public addresses only, every
+	 * redirect checked); pass `converter.guardedFetch` to use the converter's.
+	 */
+	fetch?: Fetch | undefined
+}
 
 /** Conventional sitemap locations, tried in order when robots.txt names none. */
 const SITEMAP_ROOT_PATHS = [
@@ -65,26 +86,39 @@ export function parseSitemapXml(xml: string) {
 	return { pages, nested }
 }
 
-function fetchText(url: string, accept: string) {
-	return throughCrawlSnapshot(`text ${accept} ${url}`, () =>
-		fetchTextLive(url, accept)
+type TextRequest = { accept: string; maxBytes: number; fetch: Fetch }
+
+function fetchText(url: string, request: TextRequest) {
+	return throughCrawlSnapshot(`text ${request.accept} ${url}`, () =>
+		fetchTextLive(url, request)
 	)
 }
 
-async function fetchTextLive(url: string, accept: string) {
+async function fetchTextLive(url: string, request: TextRequest) {
 	try {
-		const response = await fetch(url, {
+		const response = await request.fetch(url, {
 			signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-			headers: { accept }
+			headers: { accept: request.accept, 'user-agent': BROWSER_USER_AGENT }
 		})
-		if (!response.ok) return null
 		const type = response.headers.get('content-type') ?? ''
 		// A CMS that renders its 404 page for a missing file answers 200 with HTML.
-		if (type.includes('text/html')) return null
-		return await response.text()
+		if (!response.ok || type.includes('text/html')) {
+			void response.body?.cancel().catch(() => {})
+			return null
+		}
+		return decodeText((await readBody(response, request.maxBytes)).bytes)
 	} catch {
 		return null
 	}
+}
+
+const ROBOTS_REQUEST = {
+	accept: 'text/plain,*/*;q=0.8',
+	maxBytes: MAX_ROBOTS_BYTES
+}
+const SITEMAP_REQUEST = {
+	accept: 'application/xml,text/xml;q=0.9,*/*;q=0.8',
+	maxBytes: MAX_SITEMAP_BYTES
 }
 
 function originOf(websiteUrl: string) {
@@ -101,12 +135,18 @@ function originOf(websiteUrl: string) {
  * here), and its rules. An HTML body or any non-200 means "no robots.txt";
  * never throws.
  */
-export async function fetchRobots(websiteUrl: string) {
+export async function fetchRobots(
+	websiteUrl: string,
+	options: SitemapOptions = {}
+) {
 	const sitemaps: string[] = []
 	const origin = originOf(websiteUrl)
 	if (!origin) return { sitemaps, rules: [] }
 	const robotsUrl = `${origin}/robots.txt`
-	const body = await fetchText(robotsUrl, 'text/plain,*/*;q=0.8')
+	const body = await fetchText(robotsUrl, {
+		...ROBOTS_REQUEST,
+		fetch: options.fetch ?? guardedFetch
+	})
 	if (!body) return { sitemaps, rules: [] }
 
 	for (const match of body.matchAll(ROBOTS_SITEMAP_RE)) {
@@ -146,8 +186,7 @@ export function parseRobotsRules(body: string): RobotsRule[] {
 /**
  * Whether robots.txt lets us read this URL: the longest matching rule wins and
  * `Allow` wins a tie, as Google reads it. Shopify disallows `/cart/`, and the
- * crawler had fetched `/cart/add?id=…&quantity=1` - a GET that fills a cart
- * (Good Habit audit §3.5).
+ * crawler had fetched `/cart/add?id=…&quantity=1` - a GET that fills a cart.
  */
 export function robotsAllows(rules: RobotsRule[], url: string) {
 	return isAllowedByRobots(
@@ -167,7 +206,8 @@ export function robotsAllows(rules: RobotsRule[], url: string) {
 async function readSitemapTree(
 	roots: string[],
 	found: Map<string, { url: string; lastmod: string | null }>,
-	seen: Set<string>
+	seen: Set<string>,
+	fetch: Fetch
 ) {
 	let readable = false
 	let level = [...roots]
@@ -185,7 +225,7 @@ async function readSitemapTree(
 		}
 		const bodies = await Promise.all(
 			batch.map((sitemapUrl) =>
-				fetchText(sitemapUrl, 'application/xml,text/xml;q=0.9,*/*;q=0.8')
+				fetchText(sitemapUrl, { ...SITEMAP_REQUEST, fetch })
 			)
 		)
 		const next: string[] = []
@@ -218,10 +258,12 @@ async function readSitemapTree(
  */
 export async function discoverSitemapUrls(
 	websiteUrl: string,
-	robotsSitemaps: string[]
+	robotsSitemaps: string[],
+	options: SitemapOptions = {}
 ) {
 	const origin = originOf(websiteUrl)
 	if (!origin) return []
+	const fetch = options.fetch ?? guardedFetch
 	const found = new Map<string, { url: string; lastmod: string | null }>()
 	// Shared across roots so a broken sitemap index cannot spend the file budget
 	// several times over.
@@ -231,12 +273,12 @@ export async function discoverSitemapUrls(
 	// so all of them are read together - only the conventional roots compete.
 	if (
 		robotsSitemaps.length > 0 &&
-		(await readSitemapTree(robotsSitemaps, found, seen))
+		(await readSitemapTree(robotsSitemaps, found, seen, fetch))
 	) {
 		return [...found.values()]
 	}
 	for (const path of SITEMAP_ROOT_PATHS) {
-		if (await readSitemapTree([`${origin}${path}`], found, seen)) break
+		if (await readSitemapTree([`${origin}${path}`], found, seen, fetch)) break
 	}
 	return [...found.values()]
 }

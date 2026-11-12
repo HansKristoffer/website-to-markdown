@@ -1,6 +1,13 @@
-import { describe, expect, mock, test } from 'bun:test'
+import { afterAll, describe, expect, mock, test } from 'bun:test'
 import { createWebsiteToMarkdown } from './fetch-page.js'
-import { isBlockedAddress, isLocalhostHostname } from './net-guard.js'
+import {
+	followRedirects,
+	guardedFetch,
+	HostNotAllowedError,
+	isBlockedAddress,
+	isHostAllowed,
+	isLocalhostHostname
+} from './net-guard.js'
 
 describe('isBlockedAddress', () => {
 	test('allows public IPv4', () => {
@@ -97,5 +104,133 @@ describe('createWebsiteToMarkdown isHostAllowed', () => {
 			isHostAllowed: guard
 		})
 		expect(converter.isHostAllowed).toBe(guard)
+	})
+})
+
+describe('isHostAllowed', () => {
+	test('judges an IP literal as written, brackets and all, without DNS', async () => {
+		expect(await isHostAllowed('[fd00::1]')).toBe(false)
+		expect(await isHostAllowed('[::ffff:169.254.169.254]')).toBe(false)
+		expect(await isHostAllowed('[::ffff:a9fe:a9fe]')).toBe(false)
+		expect(await isHostAllowed('10.0.0.1')).toBe(false)
+		expect(await isHostAllowed('93.184.216.34')).toBe(true)
+		expect(await isHostAllowed('[2606:4700:4700::1111]')).toBe(true)
+	})
+
+	test('refuses localhost unless allowLocalhost is set', async () => {
+		expect(await isHostAllowed('localhost')).toBe(false)
+		expect(await isHostAllowed('[::1]')).toBe(false)
+		expect(await isHostAllowed('localhost', { allowLocalhost: true })).toBe(
+			true
+		)
+	})
+})
+
+describe('followRedirects', () => {
+	const metadata = Bun.serve({
+		port: 0,
+		fetch: () => new Response('secret')
+	})
+	const metadataHit = mock(() => {})
+	const site = Bun.serve({
+		port: 0,
+		fetch(request) {
+			const url = new URL(request.url)
+			if (url.pathname === '/to-metadata') {
+				metadataHit()
+				return Response.redirect(
+					`http://127.0.0.1:${metadata.port}/metadata`,
+					302
+				)
+			}
+			if (url.pathname === '/hop') return Response.redirect('/page', 301)
+			return new Response(`page ${request.method}`)
+		}
+	})
+	afterAll(() => {
+		metadata.stop(true)
+		site.stop(true)
+	})
+	const onlyLocalhostName = async (hostname: string) => hostname === 'localhost'
+
+	test('checks every redirect target, not just the first URL', async () => {
+		const pending = guardedFetch(
+			`http://localhost:${site.port}/to-metadata`,
+			undefined,
+			{ isHostAllowed: onlyLocalhostName }
+		)
+		await expect(pending).rejects.toBeInstanceOf(HostNotAllowedError)
+		expect(metadataHit).toHaveBeenCalledTimes(1)
+	})
+
+	test('follows an allowed redirect and reports where it ended', async () => {
+		const { response, url } = await followRedirects(
+			`http://localhost:${site.port}/hop`,
+			undefined,
+			{ isHostAllowed: onlyLocalhostName }
+		)
+		expect(await response.text()).toBe('page GET')
+		expect(url.pathname).toBe('/page')
+	})
+
+	test('drops credentials on a cross-origin hop and turns a 303 into a GET', async () => {
+		const seen: { url: string; method: string; auth: string | null }[] = []
+		const fetch = mock(async (input: string | URL, init?: RequestInit) => {
+			const url = String(input)
+			seen.push({
+				url,
+				method: init?.method ?? 'GET',
+				auth: new Headers(init?.headers).get('authorization')
+			})
+			return url.startsWith('https://a.example')
+				? new Response(null, {
+						status: 303,
+						headers: { location: 'https://b.example/done' }
+					})
+				: new Response('ok')
+		})
+		await guardedFetch(
+			'https://a.example/form',
+			{ method: 'POST', body: 'x', headers: { authorization: 'Bearer t' } },
+			{ isHostAllowed: async () => true, fetch }
+		)
+		expect(seen).toEqual([
+			{ url: 'https://a.example/form', method: 'POST', auth: 'Bearer t' },
+			{ url: 'https://b.example/done', method: 'GET', auth: null }
+		])
+	})
+
+	test('gives up after maxRedirects', async () => {
+		const fetch = mock(
+			async () =>
+				new Response(null, {
+					status: 302,
+					headers: { location: 'https://loop.example/' }
+				})
+		)
+		await expect(
+			guardedFetch('https://loop.example/', undefined, {
+				isHostAllowed: async () => true,
+				fetch,
+				maxRedirects: 2
+			})
+		).rejects.toThrow('Too many redirects')
+		expect(fetch).toHaveBeenCalledTimes(3)
+	})
+
+	test('refuses a scheme other than http(s) on a redirect', async () => {
+		const fetch = mock(
+			async () =>
+				new Response(null, {
+					status: 302,
+					headers: { location: 'file:///etc/passwd' }
+				})
+		)
+		await expect(
+			guardedFetch('https://a.example/', undefined, {
+				isHostAllowed: async () => true,
+				fetch
+			})
+		).rejects.toBeInstanceOf(HostNotAllowedError)
 	})
 })

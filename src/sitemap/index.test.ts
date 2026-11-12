@@ -8,22 +8,25 @@ import {
 	parseSitemapXml
 } from './index.js'
 
-const originalFetch = globalThis.fetch
-
 type Route = { body: string; status?: number; contentType?: string }
 
-/** Serves the routes given; everything else answers 404, like a real host. */
-function mockRoutes(routes: Record<string, Route | Error>) {
-	globalThis.fetch = mock(async (input: string | URL | Request) => {
-		const url = typeof input === 'string' ? input : input.toString()
-		const route = routes[url]
+let served: Record<string, Route | Error> = {}
+/** Serves `served`; everything else answers 404, like a real host. */
+const routes = {
+	fetch: mock(async (input: string | URL) => {
+		const route = served[String(input)]
 		if (route instanceof Error) throw route
 		if (!route) return new Response('not found', { status: 404 })
 		return new Response(route.body, {
 			status: route.status ?? 200,
 			headers: { 'content-type': route.contentType ?? 'application/xml' }
 		})
-	}) as unknown as typeof fetch
+	})
+}
+
+function mockRoutes(next: Record<string, Route | Error>) {
+	served = next
+	routes.fetch.mockClear()
 }
 
 function urlset(...urls: string[]) {
@@ -31,10 +34,6 @@ function urlset(...urls: string[]) {
 		.map((url) => `<url><loc>${url}</loc></url>`)
 		.join('')}</urlset>`
 }
-
-afterEach(() => {
-	globalThis.fetch = originalFetch
-})
 
 describe('parseSitemapXml', () => {
 	test('reads urls with lastmod from a urlset', () => {
@@ -137,7 +136,7 @@ describe('fetchRobots', () => {
 			}
 		})
 		expect(
-			(await fetchRobots('https://hotelhvideklit.dk/kontakt')).sitemaps
+			(await fetchRobots('https://hotelhvideklit.dk/kontakt', routes)).sitemaps
 		).toEqual([
 			'https://hotelhvideklit.dk/sitemap.xml',
 			'https://hotelhvideklit.dk/news-sitemap.xml',
@@ -152,15 +151,21 @@ describe('fetchRobots', () => {
 				body: '<html><body>Siden findes ikke</body></html>'
 			}
 		})
-		expect((await fetchRobots('https://lasauna.dk')).sitemaps).toEqual([])
+		expect((await fetchRobots('https://lasauna.dk', routes)).sitemaps).toEqual(
+			[]
+		)
 
 		mockRoutes({})
-		expect((await fetchRobots('https://lasauna.dk')).sitemaps).toEqual([])
+		expect((await fetchRobots('https://lasauna.dk', routes)).sitemaps).toEqual(
+			[]
+		)
 
 		mockRoutes({
 			'https://lasauna.dk/robots.txt': new Error('TLS handshake failed')
 		})
-		expect((await fetchRobots('https://lasauna.dk')).sitemaps).toEqual([])
+		expect((await fetchRobots('https://lasauna.dk', routes)).sitemaps).toEqual(
+			[]
+		)
 	})
 
 	test('ignores unfetchable lines without losing the others', async () => {
@@ -174,7 +179,7 @@ describe('fetchRobots', () => {
 				].join('\n')
 			}
 		})
-		expect((await fetchRobots('https://khtf.dk')).sitemaps).toEqual([
+		expect((await fetchRobots('https://khtf.dk', routes)).sitemaps).toEqual([
 			'https://khtf.dk/wp-sitemap.xml'
 		])
 	})
@@ -182,7 +187,11 @@ describe('fetchRobots', () => {
 
 describe('discoverSitemapUrls', () => {
 	const discover = async (websiteUrl: string) =>
-		discoverSitemapUrls(websiteUrl, (await fetchRobots(websiteUrl)).sitemaps)
+		discoverSitemapUrls(
+			websiteUrl,
+			(await fetchRobots(websiteUrl, routes)).sitemaps,
+			routes
+		)
 
 	test('prefers the robots-declared sitemaps and reads all of them', async () => {
 		mockRoutes({
@@ -320,9 +329,48 @@ describe('discoverSitemapUrls', () => {
 	})
 
 	test('an unparseable website url yields no urls and no fetch', async () => {
-		const fetchMock = mock(async () => new Response('', { status: 200 }))
-		globalThis.fetch = fetchMock as unknown as typeof fetch
+		mockRoutes({})
 		expect(await discover('ikke en url')).toEqual([])
-		expect(fetchMock).not.toHaveBeenCalled()
+		expect(routes.fetch).not.toHaveBeenCalled()
+	})
+
+	test('reads a sitemap longer than the read cap up to its last whole entry', async () => {
+		const entry = (i: number) =>
+			`<url><loc>https://cerix.dk/p/${i}-${'x'.repeat(200)}</loc></url>`
+		mockRoutes({
+			'https://cerix.dk/sitemap.xml': {
+				body: `<urlset>${Array.from({ length: 60_000 }, (_, i) => entry(i)).join('')}</urlset>`
+			}
+		})
+		const pages = await discover('https://cerix.dk')
+		expect(pages.length).toBeGreaterThan(10_000)
+		expect(pages.length).toBeLessThan(60_000)
+	})
+})
+
+describe('the default fetch', () => {
+	const originalFetch = globalThis.fetch
+	afterEach(() => {
+		globalThis.fetch = originalFetch
+	})
+
+	test('never requests a sitemap on a private address, and sends a browser user agent', async () => {
+		const calls: { url: string; headers: Headers }[] = []
+		globalThis.fetch = mock(async (input: string | URL, init?: RequestInit) => {
+			calls.push({ url: String(input), headers: new Headers(init?.headers) })
+			return new Response(
+				'User-agent: *\nSitemap: http://169.254.169.254/latest/meta-data',
+				{ headers: { 'content-type': 'text/plain' } }
+			)
+		}) as unknown as typeof fetch
+
+		const robots = await fetchRobots('https://93.184.216.34')
+		await discoverSitemapUrls('https://93.184.216.34', robots.sitemaps)
+
+		expect(robots.sitemaps).toEqual(['http://169.254.169.254/latest/meta-data'])
+		expect(calls.map((call) => call.url)).not.toContain(
+			'http://169.254.169.254/latest/meta-data'
+		)
+		expect(calls[0]?.headers.get('user-agent')).toContain('Mozilla/5.0')
 	})
 })
