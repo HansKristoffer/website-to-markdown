@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.0](https://github.com/HansKristoffer/website-to-markdown/compare/v2.0.0...v2.1.0) (2026-11-20)
+
+
+### Features
+
+* add local-first HTML/CSV conversion, 401/403 burst resilience and optional Cloudflare ([#15](https://github.com/HansKristoffer/website-to-markdown/issues/15)) ([10b9de0](https://github.com/HansKristoffer/website-to-markdown/commit/10b9de0ed8e1a200b7cc2d2b6273fe3dce0e85bd))
+
 ## [2.0.0](https://github.com/HansKristoffer/website-to-markdown/compare/v1.1.1...v2.0.0) (2026-11-12)
 
 
