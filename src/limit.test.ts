@@ -156,6 +156,39 @@ describe('host slot lifetime', () => {
 
 		expect(results.map((page) => page.outcome)).toEqual(Array(6).fill('ok'))
 	})
+
+	test('a host that returns 403 on a burst narrows and serves subsequent pages without rendering', async () => {
+		let inFlight = 0
+		globalThis.fetch = mock(async () => {
+			inFlight++
+			try {
+				await Bun.sleep(10)
+				if (inFlight > URL_TO_MARKDOWN_THROTTLED_HOST_MAX_CONCURRENCY)
+					return new Response('waf burst', {
+						status: 403,
+						headers: { 'retry-after': '0' }
+					})
+				return new Response('<html><body><h1>Kirohuset</h1></body></html>', {
+					status: 200,
+					headers: { 'content-type': 'text/html; charset=utf-8' }
+				})
+			} finally {
+				inFlight--
+			}
+		}) as unknown as typeof fetch
+
+		const { fetchPageAsMarkdown } = converter()
+		const results = await Promise.all(
+			Array.from({ length: 6 }, (_, index) =>
+				fetchPageAsMarkdown({ url: `https://kirohuset.dk/side-${index}` })
+			)
+		)
+
+		expect(results.map((page) => page.outcome)).toEqual(Array(6).fill('ok'))
+		expect(results.map((page) => page.source)).toEqual(
+			Array(6).fill('local-html')
+		)
+	})
 })
 
 describe('rate-limited host', () => {

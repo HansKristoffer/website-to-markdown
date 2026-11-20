@@ -15,12 +15,18 @@ import {
 	typedSwitchGroup
 } from 'hanzio'
 import type { ApiError } from 'hanzio/api-wrapper'
+import { parse } from 'node-html-parser'
 import {
 	type CloudflareCredentials,
 	CloudflareRateLimitedError,
+	type ConvertFileInput,
 	createCloudflareClient
 } from './client.js'
-import { classifyContentType, convertibleDocumentType } from './content-type.js'
+import {
+	classifyContentType,
+	convertibleDocumentType,
+	isCsvContentType
+} from './content-type.js'
 import {
 	type CrawlSnapshotInput,
 	type CrawlSnapshotOptions,
@@ -28,6 +34,7 @@ import {
 	throughCrawlSnapshot,
 	withCrawlSnapshot
 } from './crawl-snapshot.js'
+import { csvToMarkdownTable } from './csv-to-markdown.js'
 import {
 	isApplicationShell,
 	isBlankMarkdown,
@@ -36,6 +43,7 @@ import {
 import { sha256Hex } from './hash.js'
 import { extractHtmlMetadata } from './html-metadata.js'
 import { type CreateConcurrencyLimit, createHostLimits } from './limit.js'
+import { localHtmlToMarkdown } from './local-html-to-markdown.js'
 import { errorLogAttributes, type Logger, silentLogger } from './logger.js'
 import {
 	cleanConvertedMarkdown,
@@ -165,7 +173,8 @@ function cleanText(text: string) {
 function buildPage(
 	base: PageBase,
 	rawBody: PageBody,
-	logger: Logger
+	logger: Logger,
+	strategy: HtmlConversionStrategy
 ): FetchedPage {
 	const body = {
 		...rawBody,
@@ -222,7 +231,7 @@ function buildPage(
 				: (body.captureIssue ?? null),
 		durationMs: Math.round(base.elapsedMs()),
 		// Over the cleaned HTML, as `convertTextual` compares it.
-		htmlHash: body.html ? htmlHash(body.html) : null
+		htmlHash: body.html ? htmlHash(body.html, strategy) : null
 	}
 }
 
@@ -289,14 +298,14 @@ function rateLimitWaitMs(response: Response, retry: number) {
 
 /**
  * Bump whenever conversion changes what the same HTML becomes (`withoutHiddenUi`,
- * the Workers AI call, the fallback tiers): the stored hash then no longer
- * matches, and every page is converted again once instead of keeping the
- * markdown the old conversion made.
+ * `localHtmlToMarkdown`, the Workers AI call, the fallback tiers): the stored
+ * hash then no longer matches, and every page is converted again once instead of
+ * keeping the markdown the old conversion made.
  */
-const CONVERSION_VERSION = 2
+const CONVERSION_VERSION = 3
 
-function htmlHash(html: string) {
-	return sha256Hex(`${CONVERSION_VERSION}\n${html}`)
+function htmlHash(html: string, strategy: HtmlConversionStrategy) {
+	return sha256Hex(`${CONVERSION_VERSION}:${strategy}\n${html}`)
 }
 
 /** The request URL with the market pinned; the URL itself when there is none. */
@@ -438,21 +447,47 @@ const HIDDEN_UI_SELECTOR = [
 	'dialog:not([open])',
 	'form[action*="/contact"]',
 	'[style*="display:none"] label',
-	'[style*="display: none"] label'
+	'[style*="display: none"] label',
+	'select',
+	'option',
+	'optgroup',
+	'textarea',
+	'input',
+	'svg',
+	'script',
+	'style',
+	'noscript',
+	'iframe'
 ].join(', ')
 
 function withoutHiddenUi(html: string) {
-	return new HTMLRewriter()
-		.on(HIDDEN_UI_SELECTOR, {
-			element(element) {
-				element.remove()
-			}
-		})
-		.transform(html)
+	if (typeof HTMLRewriter === 'function') {
+		return new HTMLRewriter()
+			.on(HIDDEN_UI_SELECTOR, {
+				element(element) {
+					element.remove()
+				}
+			})
+			.transform(html)
+	}
+	const root = parse(html, { lowerCaseTagName: true })
+	for (const element of root.querySelectorAll(HIDDEN_UI_SELECTOR)) {
+		element.remove()
+	}
+	return root.toString()
 }
 
 /** A real browser passes these; every other 4xx has nothing for it to find. */
 const BOT_WALL_STATUSES = [401, 403] as const
+/** Cooldown before retrying a 401/403 once in case a WAF tripped on a crawl burst. */
+const BOT_WALL_RETRY_WAIT_MS = 1_500
+
+function botWallRetryWaitMs(response: Response) {
+	const askedMs = parseRetryAfter(response.headers.get('retry-after'))
+	return Math.min(MAX_RATE_LIMIT_WAIT_MS, askedMs ?? BOT_WALL_RETRY_WAIT_MS)
+}
+
+export type HtmlConversionStrategy = 'local-first' | 'workers-ai-first'
 
 export type FetchPageInput = {
 	url: string
@@ -483,8 +518,21 @@ export type PdfParser = (input: {
 }) => Promise<{ markdown: string; numPages: number | null }>
 
 export type WebsiteToMarkdownOptions = {
-	/** Workers AI and Browser Rendering; read on first use, so getters work. */
-	cloudflare: CloudflareCredentials
+	/**
+	 * Workers AI and Browser Rendering; read on first use, so getters work.
+	 * Omit when only local HTML/Markdown/CSV conversion is needed; Workers AI
+	 * and Browser Rendering tiers are then skipped gracefully.
+	 */
+	cloudflare?: CloudflareCredentials | undefined
+	/**
+	 * How HTML pages are converted to markdown.
+	 * - `'local-first'` (default): convert locally with {@link localHtmlToMarkdown}
+	 *   and escalate only JS application shells or blank conversions to Browser
+	 *   Rendering.
+	 * - `'workers-ai-first'`: upload HTML to Cloudflare Workers AI `toMarkdown`
+	 *   first and escalate shells/blanks to Browser Rendering.
+	 */
+	htmlConversion?: HtmlConversionStrategy | undefined
 	/**
 	 * Builds every pool: the two Cloudflare ones and one per origin host.
 	 * Defaults to an in-memory limiter; pass a shared one (Redis) when several
@@ -522,19 +570,25 @@ export type WebsiteToMarkdownOptions = {
 }
 
 /**
- * One converter: its Cloudflare client, pools and per-host politeness limits.
- * Create it once per process; every call shares the pools.
+ * One converter: its optional Cloudflare client, pools and per-host politeness
+ * limits. Create it once per process; every call shares the pools.
  */
-export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
+export function createWebsiteToMarkdown(
+	options: WebsiteToMarkdownOptions = {}
+) {
 	const logger = options.logger ?? silentLogger
 	const createLimit = options.createLimit ?? createMemoryConcurrencyLimit
-	const client = createCloudflareClient({
-		credentials: options.cloudflare,
-		createLimit,
-		onApiError: options.onApiError,
-		reportTimeouts: options.reportTimeouts,
-		logger
-	})
+	const htmlConversion: HtmlConversionStrategy =
+		options.htmlConversion ?? 'local-first'
+	const client = options.cloudflare
+		? createCloudflareClient({
+				credentials: options.cloudflare,
+				createLimit,
+				onApiError: options.onApiError,
+				reportTimeouts: options.reportTimeouts,
+				logger
+			})
+		: null
 	const hostLimits = createHostLimits(createLimit)
 	const allowLocalhost = options.allowLocalhost === true
 	const allowHost =
@@ -556,20 +610,24 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 			// The Cloudflare tiers stay outside it - they are
 			// our upstreams with their own pools, and holding a customer's slot
 			// across a 60s render would stall the crawl for no politeness gain.
-			const read = await hostLimits.withHostLimit(url.hostname, async () => {
-				const hop = await followRedirects(
-					url,
-					{ signal: timeoutSignal(FETCH_TIMEOUT_MS, signal), headers },
-					guard
-				)
-				const response = hop.response
-				const finalUrl = parseFinalUrl(response.url, hop.url)
-				return {
-					response,
-					finalUrl,
-					body: await readOriginBody(response, finalUrl, logger)
-				}
-			})
+			const read = await hostLimits.withHostLimit(
+				url.hostname,
+				async () => {
+					const hop = await followRedirects(
+						url,
+						{ signal: timeoutSignal(FETCH_TIMEOUT_MS, signal), headers },
+						guard
+					)
+					const response = hop.response
+					const finalUrl = parseFinalUrl(response.url, hop.url)
+					return {
+						response,
+						finalUrl,
+						body: await readOriginBody(response, finalUrl, logger)
+					}
+				},
+				signal
+			)
 			return { kind: 'read', read }
 		} catch (error) {
 			// The guard refused the URL or a redirect: policy, not a network blip.
@@ -585,31 +643,60 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 	}
 
 	/**
-	 * Bytes of a document to markdown: Workers AI `toMarkdown` first, the
-	 * `parsePdf` tier (e.g. Firecrawl: text-first, OCR fallback) for a PDF Workers
-	 * AI returned nothing for. Shared by the crawler (a linked terms PDF) and file
-	 * uploads (the same PDF dropped in by hand), so both read a file the same
-	 * way. `workersAiMaxBytes` is the caller's budget: the crawler keeps it at
-	 * {@link MAX_DOCUMENT_BYTES}; an upload of a 50 MB scanned catalogue may go
-	 * straight to the OCR tier.
+	 * Bytes of a document to markdown: `.html`/`.htm` and `.csv` convert locally
+	 * without a network hop; binary documents use Workers AI `toMarkdown` first
+	 * and the `parsePdf` tier (e.g. Firecrawl: text-first, OCR fallback) for a
+	 * PDF Workers AI returned nothing for. Shared by the crawler (a linked terms
+	 * PDF) and file uploads (the same PDF dropped in by hand), so both read a
+	 * file the same way. `workersAiMaxBytes` is the caller's budget: the crawler
+	 * keeps it at {@link MAX_DOCUMENT_BYTES}; an upload of a 50 MB scanned
+	 * catalogue may go straight to the OCR tier.
 	 */
 	async function convertDocumentBytes(input: {
 		bytes: ArrayBuffer
 		filename: string
 		mimeType: string
 		extension: string
+		/** Optional base URL for resolving relative links in `.html`/`.htm` files. */
+		baseUrl?: string | undefined
 		workersAiMaxBytes?: number | undefined
 		signal?: AbortSignal | undefined
 	}): Promise<PageBody> {
 		const { bytes } = input
 		if (!bytes.byteLength) return { outcome: 'unsupported', source: null }
 		if (input.signal?.aborted) return { outcome: 'transient', source: null }
+
+		const extension = input.extension.toLowerCase().replace(/^\./, '')
+		const mimeType = input.mimeType.split(';')[0]?.trim().toLowerCase() ?? ''
+
+		if (
+			isOneOf(['html', 'htm'], extension) ||
+			isOneOf(['text/html', 'application/xhtml+xml'], mimeType)
+		) {
+			const html = cleanText(decodeText(new Uint8Array(bytes)))
+			const markdown = localHtmlToMarkdown(html, input.baseUrl)
+			return isBlankMarkdown(markdown)
+				? { outcome: 'unsupported', source: null }
+				: { outcome: 'ok', source: 'local-html', markdown }
+		}
+
+		if (extension === 'csv' || isCsvContentType(mimeType)) {
+			const text = cleanText(decodeText(new Uint8Array(bytes)))
+			const markdown = csvToMarkdownTable(text)
+			return isBlankMarkdown(markdown)
+				? { outcome: 'unsupported', source: null }
+				: { outcome: 'ok', source: 'local-csv', markdown }
+		}
+
 		let workersAiRateLimited = false
 		let markdown: string | null = null
-		if (bytes.byteLength <= (input.workersAiMaxBytes ?? MAX_DOCUMENT_BYTES)) {
+		if (
+			client &&
+			bytes.byteLength <= (input.workersAiMaxBytes ?? MAX_DOCUMENT_BYTES)
+		) {
 			try {
 				markdown = await client.convertFileWithWorkersAi({
-					body: input.extension === 'xlsx' ? preserveXlsxZeros(bytes) : bytes,
+					body: extension === 'xlsx' ? preserveXlsxZeros(bytes) : bytes,
 					filename: input.filename,
 					mimeType: input.mimeType,
 					signal: input.signal
@@ -622,7 +709,14 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 		const body = stripDocumentPreamble(markdown ?? '')
 		if (!isBlankMarkdown(body))
 			return { outcome: 'ok', source: 'workers-ai', markdown: body }
-		if (input.extension !== 'pdf') {
+		if (extension !== 'pdf') {
+			if (!client) {
+				return {
+					outcome: 'unsupported',
+					source: null,
+					captureIssue: 'cloudflare_not_configured'
+				}
+			}
 			return {
 				outcome: 'transient',
 				source: null,
@@ -630,6 +724,13 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 			}
 		}
 		if (input.signal?.aborted) return { outcome: 'transient', source: null }
+		if (!options.parsePdf && !client) {
+			return {
+				outcome: 'unsupported',
+				source: null,
+				captureIssue: 'cloudflare_not_configured'
+			}
+		}
 		try {
 			const parsePdf = must(options.parsePdf, 'No PDF parser configured')
 			const parsed = await parsePdf({
@@ -695,6 +796,7 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 	async function convertTextual(input: {
 		text: string
 		kind: TextualKind
+		contentType: string | null
 		finalUrl: URL
 		render: boolean
 		/** The hash of the HTML last read; see `FetchedPage.htmlHash`. */
@@ -711,17 +813,24 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 			text: () => looksLikeHtml(body)
 		})
 
-		if (!isHtml && !isBlankMarkdown(body)) {
-			return { outcome: 'ok', source: 'content-negotiation', markdown: body }
+		if (!isHtml) {
+			if (input.kind === 'text' && isCsvContentType(input.contentType)) {
+				const table = csvToMarkdownTable(body)
+				if (!isBlankMarkdown(table)) {
+					return { outcome: 'ok', source: 'local-csv', markdown: table }
+				}
+			} else if (!isBlankMarkdown(body)) {
+				return { outcome: 'ok', source: 'content-negotiation', markdown: body }
+			}
 		}
 
 		const html = isHtml ? body : null
 		// Most origins send no validators, so without this every page of a quiet
-		// site went through Workers AI again every night to learn nothing moved.
+		// site went through conversion again every night to learn nothing moved.
 		if (
 			html &&
 			input.htmlHash &&
-			htmlHash(cleanText(html)) === input.htmlHash
+			htmlHash(cleanText(html), htmlConversion) === input.htmlHash
 		) {
 			return { outcome: 'unchanged', source: 'not-modified' }
 		}
@@ -744,35 +853,62 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 		let shell = false
 		let workersAiRateLimited = false
 		let renderRateLimited = false
+		let fallbackMarkdown: string | null = null
+		let fallbackSource: FetchSource | null = null
+
 		if (html) {
-			const visible = withoutHiddenUi(html)
-			let converted: string | null = null
-			try {
-				converted = await client.convertHtmlWithWorkersAi({
-					html: visible,
-					// The post-redirect host: Cloudflare resolves relative links against it.
-					hostname: input.finalUrl.hostname,
-					signal: input.signal
-				})
-			} catch (error) {
-				if (!(error instanceof CloudflareRateLimitedError)) throw error
-				workersAiRateLimited = true
-			}
-			if (converted && !isBlankMarkdown(converted)) {
-				shell = isApplicationShell(visible, converted)
-				if (!shell)
+			const converted = await typedSwitch(htmlConversion, {
+				'local-first': async (): Promise<{
+					markdown: string | null
+					source: FetchSource
+				}> => ({
+					markdown: localHtmlToMarkdown(html, input.finalUrl.href),
+					source: 'local-html'
+				}),
+				'workers-ai-first': async (): Promise<{
+					markdown: string | null
+					source: FetchSource
+				}> => {
+					if (!client) return { markdown: null, source: 'workers-ai' }
+					const visible = withoutHiddenUi(html)
+					try {
+						return {
+							markdown: await client.convertHtmlWithWorkersAi({
+								html: visible,
+								// The post-redirect host: Cloudflare resolves relative links against it.
+								hostname: input.finalUrl.hostname,
+								signal: input.signal
+							}),
+							source: 'workers-ai'
+						}
+					} catch (error) {
+						if (!(error instanceof CloudflareRateLimitedError)) throw error
+						workersAiRateLimited = true
+						return { markdown: null, source: 'workers-ai' }
+					}
+				}
+			})
+
+			if (converted.markdown && !isBlankMarkdown(converted.markdown)) {
+				shell = isApplicationShell(html, converted.markdown)
+				if (!shell) {
 					return {
 						outcome: 'ok',
-						source: 'workers-ai',
-						markdown: converted,
+						source: converted.source,
+						markdown: converted.markdown,
 						html
 					}
+				}
+				fallbackMarkdown = converted.markdown
+				fallbackSource = converted.source
+			} else {
+				shell = isApplicationShell(html, '')
 			}
 		}
 
 		// Browser Rendering is the exception path: slow, rate limited, and the only
 		// tier that ever timed out in the probe.
-		if (input.render && !input.signal?.aborted) {
+		if (input.render && !input.signal?.aborted && client) {
 			let rendered: string | null = null
 			try {
 				rendered = await client.renderUrlToMarkdown(
@@ -796,6 +932,47 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 				}
 			}
 		}
+
+		// If Browser Rendering failed or is unavailable, keep non-empty local
+		// markdown rather than returning `transient` with 0 chars.
+		if (
+			fallbackMarkdown &&
+			fallbackSource === 'local-html' &&
+			!isBlankMarkdown(fallbackMarkdown)
+		) {
+			return {
+				outcome: 'ok',
+				source: fallbackSource,
+				markdown: fallbackMarkdown,
+				html,
+				captureIssue: renderRateLimited
+					? 'browser_rendering_rate_limited'
+					: !client && input.render
+						? 'cloudflare_not_configured'
+						: 'render_incomplete'
+			}
+		}
+
+		if (renderRateLimited) {
+			return {
+				outcome: 'transient',
+				source: null,
+				html,
+				captureIssue: 'browser_rendering_rate_limited'
+			}
+		}
+		if (
+			!client &&
+			((shell && input.render) ||
+				(html !== null && htmlConversion === 'workers-ai-first'))
+		) {
+			return {
+				outcome: 'unsupported',
+				source: null,
+				html,
+				captureIssue: 'cloudflare_not_configured'
+			}
+		}
 		return {
 			outcome: 'transient',
 			source: null,
@@ -804,9 +981,7 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 				? 'render_incomplete'
 				: workersAiRateLimited
 					? 'workers_ai_rate_limited'
-					: renderRateLimited
-						? 'browser_rendering_rate_limited'
-						: null
+					: null
 		}
 	}
 
@@ -833,6 +1008,16 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 		if (status >= 400) {
 			if (!input.render || !isOneOf(BOT_WALL_STATUSES, status)) {
 				return { outcome: 'blocked', source: null }
+			}
+			if (input.signal?.aborted) {
+				return { outcome: 'transient', source: null }
+			}
+			if (!client) {
+				return {
+					outcome: 'blocked',
+					source: null,
+					captureIssue: 'cloudflare_not_configured'
+				}
 			}
 			let rendered: string | null
 			try {
@@ -875,6 +1060,7 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 						? convertTextual({
 								text: body.text,
 								kind: textualKind,
+								contentType,
 								finalUrl: input.finalUrl,
 								render: input.render,
 								htmlHash: input.htmlHash,
@@ -890,10 +1076,11 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 	}
 
 	/**
-	 * Read one URL as markdown through Cloudflare's three tiers - content
-	 * negotiation, Workers AI `toMarkdown`, Browser Rendering - and report
-	 * everything the import pipeline needs about the page: real status, redirect
-	 * target, validators, HTML metadata and absolute links.
+	 * Read one URL as markdown through the conversion tiers - content
+	 * negotiation, local HTML/CSV (or Workers AI `toMarkdown`), Browser
+	 * Rendering - and report everything the import pipeline needs about the
+	 * page: real status, redirect target, validators, HTML metadata and absolute
+	 * links.
 	 *
 	 * Never throws: a page that cannot be read is an outcome, not an exception,
 	 * because the caller is crawling hundreds of URLs at a time. Anything
@@ -923,7 +1110,8 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 					elapsedMs
 				},
 				{ outcome: 'transient', source: null },
-				logger
+				logger,
+				htmlConversion
 			)
 		}
 	}
@@ -964,7 +1152,8 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 					elapsedMs
 				},
 				{ outcome: 'unsupported', source: null },
-				logger
+				logger,
+				htmlConversion
 			)
 		}
 
@@ -1011,6 +1200,32 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 			attempt = await request(requestUrl)
 		}
 
+		// Shared-hosting WAFs (e.g. LiteSpeed/WordPress) can answer 403 under a
+		// 16-wide crawl burst. Cool down the host and retry once before treating
+		// the page as a bot wall and escalating to Browser Rendering.
+		if (
+			attempt.kind === 'read' &&
+			isOneOf(BOT_WALL_STATUSES, attempt.read.response.status) &&
+			!signal?.aborted
+		) {
+			const waitMs = botWallRetryWaitMs(attempt.read.response)
+			if (await hostLimits.coolDownHost(requestUrl.hostname, waitMs)) {
+				logger.warn('url-to-markdown.host_bot_wall_cooldown', {
+					host: requestUrl.hostname,
+					status: attempt.read.response.status,
+					wait_ms: waitMs
+				})
+			}
+			const retry = await request(requestUrl)
+			if (
+				retry.kind === 'read' ||
+				retry.kind === 'refused' ||
+				signal?.aborted
+			) {
+				attempt = retry
+			}
+		}
+
 		if (attempt.kind !== 'read') {
 			return buildPage(
 				{
@@ -1030,7 +1245,8 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 					}),
 					source: null
 				},
-				logger
+				logger,
+				htmlConversion
 			)
 		}
 
@@ -1060,7 +1276,8 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 				elapsedMs
 			},
 			body,
-			logger
+			logger,
+			htmlConversion
 		)
 
 		logger.info('url-to-markdown.completed', {
@@ -1086,12 +1303,27 @@ export function createWebsiteToMarkdown(options: WebsiteToMarkdownOptions) {
 		return { markdown, source }
 	}
 
+	async function convertFileWithWorkersAi(
+		input: ConvertFileInput
+	): Promise<string | null> {
+		if (!client) return null
+		return client.convertFileWithWorkersAi(input)
+	}
+
+	async function renderUrlToMarkdown(
+		url: string,
+		signal?: AbortSignal
+	): Promise<string | null> {
+		if (!client) return null
+		return client.renderUrlToMarkdown(url, signal)
+	}
+
 	return {
 		fetchPageAsMarkdown,
 		convertDocumentBytes,
 		urlToMarkdown,
-		convertFileWithWorkersAi: client.convertFileWithWorkersAi,
-		renderUrlToMarkdown: client.renderUrlToMarkdown,
+		convertFileWithWorkersAi,
+		renderUrlToMarkdown,
 		/** The SSRF guard the converter runs, bound to its `logger`. */
 		isHostAllowed: allowHost,
 		/**

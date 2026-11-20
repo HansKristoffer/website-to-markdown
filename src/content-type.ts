@@ -8,6 +8,8 @@ const MARKDOWN_CONTENT_TYPES = [
 
 const HTML_CONTENT_TYPES = ['text/html', 'application/xhtml+xml'] as const
 
+const CSV_CONTENT_TYPES = ['text/csv', 'application/csv'] as const
+
 const TEXTUAL_CONTENT_TYPES = [
 	'application/xml',
 	'application/json',
@@ -67,6 +69,11 @@ export function convertibleDocumentType(contentType: string | null) {
 }
 
 export type ContentKind = 'markdown' | 'html' | 'text' | 'document' | 'asset'
+
+/** Whether the header declares a CSV body that can become a GFM table locally. */
+export function isCsvContentType(contentType: Nullable<string>) {
+	return isOneOf(CSV_CONTENT_TYPES, normalizeContentType(contentType))
+}
 
 /** What the fetch layer should do with a body, decided from the header alone. */
 export function classifyContentType(contentType: string | null): ContentKind {

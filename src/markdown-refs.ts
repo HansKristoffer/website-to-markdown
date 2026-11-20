@@ -70,12 +70,15 @@ export function stripDocumentPreamble(markdown: string): string {
 const CF_EMAIL_LINK_RE =
 	/\[(?:[^[\]\\]|\\.|\[[^\]]*\])*\]\((?:https?:\/\/[^/)]+)?\/cdn-cgi\/l\/email-protection#([0-9a-fA-F]{8,})\)/g
 
-function decodeCloudflareEmail(hex: string) {
-	const key = Number.parseInt(hex.slice(0, 2), 16)
+/** Decode Cloudflare's XOR-obfuscated `data-cfemail` / `#hex` e-mail payload. */
+export function decodeCloudflareEmail(hex: string) {
+	const cleaned = hex.trim()
+	if (!/^[0-9a-fA-F]{8,}$/.test(cleaned)) return null
+	const key = Number.parseInt(cleaned.slice(0, 2), 16)
 	let address = ''
-	for (let index = 2; index + 1 < hex.length; index += 2) {
+	for (let index = 2; index + 1 < cleaned.length; index += 2) {
 		address += String.fromCharCode(
-			Number.parseInt(hex.slice(index, index + 2), 16) ^ key
+			Number.parseInt(cleaned.slice(index, index + 2), 16) ^ key
 		)
 	}
 	return /^[^\s@]+@[^\s@]+\.[^\s@.]+$/.test(address) ? address : null

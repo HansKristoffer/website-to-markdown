@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import { classifyContentType, convertibleDocumentType } from './content-type.js'
+import {
+	classifyContentType,
+	convertibleDocumentType,
+	isCsvContentType
+} from './content-type.js'
 
 describe('classifyContentType', () => {
 	test('classifies the tiers a page can arrive on', () => {
@@ -53,5 +57,15 @@ describe('convertibleDocumentType', () => {
 	test('does not resolve a content type through Object.prototype', () => {
 		expect(convertibleDocumentType('constructor')).toBeNull()
 		expect(classifyContentType('constructor')).toBe('asset')
+	})
+})
+
+describe('isCsvContentType', () => {
+	test('recognizes text/csv and application/csv with optional parameters', () => {
+		expect(isCsvContentType('text/csv')).toBe(true)
+		expect(isCsvContentType('text/csv; charset=utf-8')).toBe(true)
+		expect(isCsvContentType('application/csv')).toBe(true)
+		expect(isCsvContentType('text/plain')).toBe(false)
+		expect(isCsvContentType(null)).toBe(false)
 	})
 })

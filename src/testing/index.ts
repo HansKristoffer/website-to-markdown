@@ -9,7 +9,7 @@ export function fakePage(
 		finalUrl: page.url,
 		status: 200,
 		outcome: 'ok',
-		source: 'workers-ai',
+		source: 'local-html',
 		contentType: 'text/html; charset=utf-8',
 		etag: null,
 		lastModified: null,

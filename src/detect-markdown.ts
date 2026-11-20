@@ -33,9 +33,13 @@ export function isApplicationShell(html: string, markdown: string) {
 		/(?:enable|requires?|turn on)\s+javascript|loading(?:\.{3}|…)?|please wait/i.test(
 			prose
 		)
+	const withoutTemplates = html.replace(
+		/<template\b[^>]*>[\s\S]*?<\/template\s*>/gi,
+		''
+	)
 	const emptyMount =
 		/<(?:div|main)\b[^>]*id=["'](?:root|app|__next|__nuxt)["'][^>]*>\s*<\//i.test(
-			html
+			withoutTemplates
 		)
 	return (
 		!prose ||

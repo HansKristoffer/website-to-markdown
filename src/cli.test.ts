@@ -6,10 +6,18 @@ import { main } from './cli.js'
 
 const server = Bun.serve({
 	port: 0,
-	fetch: () =>
-		new Response('# About\n\nHello from the fixture.', {
+	fetch: (request) => {
+		const { pathname } = new URL(request.url)
+		if (pathname === '/html') {
+			return new Response(
+				'<html><head><title>Local</title></head><body><h1>Local</h1><p>No Cloudflare needed.</p></body></html>',
+				{ headers: { 'content-type': 'text/html; charset=utf-8' } }
+			)
+		}
+		return new Response('# About\n\nHello from the fixture.', {
 			headers: { 'content-type': 'text/markdown; charset=utf-8' }
 		})
+	}
 })
 const directory = await mkdtemp(join(tmpdir(), 'website-to-markdown-cli-'))
 afterAll(async () => {
@@ -32,7 +40,7 @@ async function run(argv: string[], runEnv: Record<string, string> = env) {
 
 const help = `Usage: website-to-markdown <url> [options]
 
-Fetch a public URL as markdown. Needs CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID.
+Fetch a public URL as markdown. Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID to enable Browser Rendering and binary document conversion.
 
 Arguments:
   <url>  e.g. https://example.com/about
@@ -83,11 +91,26 @@ test('fetches a page: markdown to stdout, metadata to stderr', async () => {
 	})
 })
 
-test('missing Cloudflare credentials exit 1', async () => {
-	expect(await run(['https://example.com'], {})).toEqual({
+test('converts static HTML locally without Cloudflare credentials', async () => {
+	const url = `http://localhost:${server.port}/html`
+	const { code, stdout, stderr } = await run([url], {})
+	expect(code).toBe(0)
+	expect(stdout).toBe('# Local\n\nNo Cloudflare needed.\n')
+	const [, ...metadata] = stderr.split('\n')
+	expect(JSON.parse(metadata.join('\n'))).toMatchObject({
+		outcome: 'ok',
+		source: 'local-html',
+		title: 'Local'
+	})
+})
+
+test('partial Cloudflare credentials exit 1', async () => {
+	expect(
+		await run(['https://example.com'], { CLOUDFLARE_API_TOKEN: 'token' })
+	).toEqual({
 		code: 1,
 		stdout: '',
-		stderr: 'Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID.\n'
+		stderr: 'Set both CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID.\n'
 	})
 })
 
@@ -110,7 +133,7 @@ test('--env-file supplies the Cloudflare credentials', async () => {
 	expect((await run([url, '--no-render', '--env-file', envFile])).code).toBe(0)
 	expect(
 		(await run([url, '--no-render', '--env-file', envFile], {})).stderr
-	).toBe('Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID.\n')
+	).toBe('Set both CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID.\n')
 })
 
 test('an unreadable --env-file exits 1', async () => {

@@ -31,7 +31,7 @@ export const cli = defineCli({
 		// Unknown flags and extra positionals are ignored, as in 1.0.
 		strict: false,
 		description:
-			'Fetch a public URL as markdown. Needs CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID.',
+			'Fetch a public URL as markdown. Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID to enable Browser Rendering and binary document conversion.',
 		input: z.object({
 			url: z
 				.string()
@@ -54,16 +54,19 @@ export const cli = defineCli({
 				ctx.env.CLOUDFLARE_API_TOKEN || file.CLOUDFLARE_API_TOKEN
 			const CLOUDFLARE_ACCOUNT_ID =
 				ctx.env.CLOUDFLARE_ACCOUNT_ID || file.CLOUDFLARE_ACCOUNT_ID
-			if (!CLOUDFLARE_API_TOKEN || !CLOUDFLARE_ACCOUNT_ID)
+			if (Boolean(CLOUDFLARE_API_TOKEN) !== Boolean(CLOUDFLARE_ACCOUNT_ID))
 				throw new CliError(
-					'Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID.'
+					'Set both CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID.'
 				)
 
 			const { fetchPageAsMarkdown } = createWebsiteToMarkdown({
-				cloudflare: {
-					apiToken: CLOUDFLARE_API_TOKEN,
-					accountId: CLOUDFLARE_ACCOUNT_ID
-				},
+				...(CLOUDFLARE_API_TOKEN &&
+					CLOUDFLARE_ACCOUNT_ID && {
+						cloudflare: {
+							apiToken: CLOUDFLARE_API_TOKEN,
+							accountId: CLOUDFLARE_ACCOUNT_ID
+						}
+					}),
 				// Run by a person on their own machine, so a dev server is fair game.
 				allowLocalhost: true
 			})

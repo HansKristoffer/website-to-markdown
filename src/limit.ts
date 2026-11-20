@@ -167,7 +167,11 @@ export function createHostLimits(
 	}
 
 	return {
-		async withHostLimit<T>(hostname: string, run: () => Promise<T>) {
+		async withHostLimit<T>(
+			hostname: string,
+			run: () => Promise<T>,
+			signal?: AbortSignal
+		) {
 			const entry = getEntry(hostname)
 			// Counted around the whole wait+run so eviction can tell a limiter that
 			// is merely cached from one that is holding slots right now.
@@ -177,18 +181,18 @@ export function createHostLimits(
 					// A lapsed throttle is kept for the host's next 429; eviction disposes it.
 					const throttle =
 						Date.now() < entry.throttledUntil ? entry.throttle : null
-					return throttle ? throttle(run) : run()
-				})
+					return throttle ? throttle(run, signal) : run()
+				}, signal)
 			} finally {
 				entry.inFlight--
 			}
 		},
 
 		/**
-		 * The host answered 429: from now on it is read at the throttled cap, and
-		 * nothing is sent to it for `waitMs`. A shared limiter shares the pause, so
-		 * every worker reading the host waits it out. True when this 429 is what
-		 * narrowed the host.
+		 * The host answered 429 or a burst 401/403: from now on it is read at the
+		 * throttled cap, and nothing is sent to it for `waitMs`. A shared limiter
+		 * shares the pause, so every worker reading the host waits it out. True
+		 * when this cooldown is what narrowed the host.
 		 */
 		async coolDownHost(hostname: string, waitMs: number) {
 			const entry = getEntry(hostname)
