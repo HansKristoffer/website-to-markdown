@@ -68,7 +68,8 @@
 	},
 	"dependencies": {
 		"cloudflare": "^5.2.0",
-		"fflate": "^0.8.2"
+		"fflate": "^0.8.2",
+		"node-html-parser": "^9.0.7"
 	},
 	"peerDependencies": {
 		"hanzio": "^3.4.0",

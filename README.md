@@ -1,10 +1,10 @@
 # website-to-markdown
 
-Turn URLs, HTML and files into markdown through Cloudflare's tiers (content
-negotiation, Workers AI `toMarkdown`, Browser Rendering), with an SSRF guard,
-per-host politeness limits, `Retry-After` handling, crawl snapshots for
-benchmarks, and robots.txt + sitemap discovery. Runs on Bun (it uses
-`HTMLRewriter`).
+Turn URLs, HTML and files into markdown with a fast local-first HTML/CSV
+converter and optional Cloudflare tiers (Workers AI `toMarkdown`, Browser
+Rendering), plus an SSRF guard, per-host politeness limits, `Retry-After` and
+401/403 burst cooldown handling, crawl snapshots for benchmarks, and
+robots.txt + sitemap discovery.
 
 ```sh
 bun add website-to-markdown hanzio zod
@@ -15,7 +15,12 @@ bun add website-to-markdown hanzio zod
 ```ts
 import { createWebsiteToMarkdown } from 'website-to-markdown'
 
-const converter = createWebsiteToMarkdown({
+// Local HTML, markdown and CSV conversion work with no credentials:
+const converter = createWebsiteToMarkdown()
+
+// Pass `cloudflare` to also enable Browser Rendering (JS SPAs / bot walls)
+// and Workers AI `toMarkdown` (PDF, DOCX, XLSX, PPTX, images):
+const withCloudflare = createWebsiteToMarkdown({
 	// Read on first use, so getters over a secret store work.
 	cloudflare: { apiToken: '…', accountId: '…' }
 })
@@ -26,22 +31,34 @@ if (page.outcome === 'ok') console.log(page.title, page.markdown, page.links)
 
 `fetchPageAsMarkdown` never throws: a page that cannot be read comes back as
 an `outcome`, and anything unexpected is logged and comes back `transient`.
-`convertDocumentBytes` converts an uploaded file (PDF, office files, images);
+`convertDocumentBytes` converts an uploaded file (`.html`/`.htm` and `.csv`
+locally; PDF, office files and images via Workers AI / `parsePdf`);
 `urlToMarkdown` is the one-shot form that throws.
+
+Standalone local helpers are also exported directly:
+
+```ts
+import { csvToMarkdownTable, localHtmlToMarkdown } from 'website-to-markdown'
+
+const md = localHtmlToMarkdown('<h1>Priser</h1><p>595 kr.</p>', 'https://example.dk/')
+const table = csvToMarkdownTable('Behandling;Pris\nKlipning;450 kr.\n')
+```
 
 | `outcome` | Meaning | `markdown` |
 |---|---|---|
 | `ok` | Read and converted. | the page |
 | `unchanged` | A 304, or the same HTML as the `htmlHash` given. Keep the stored copy. | empty |
 | `gone` | 404 or 410. | empty |
-| `blocked` | A 4xx other than 429, a bot wall Browser Rendering could not pass, or the SSRF guard refused the URL or a redirect. | empty |
+| `blocked` | A 4xx other than 429, a bot wall Browser Rendering could not pass (after a cooldown retry), or the SSRF guard refused the URL or a redirect. | empty |
 | `transient` | 5xx, a 429 after three paused retries, a network failure, or every conversion tier missed. Try again next run. | empty |
-| `unsupported` | Not a URL we read (bad URL, asset, oversized HTML or document). It will not get better on its own. | empty |
+| `unsupported` | Not a URL we read (bad URL, asset, oversized HTML or document, or a Cloudflare-only tier with no `cloudflare` credentials). It will not get better on its own. | empty |
 
 `source` says which tier produced the markdown: `content-negotiation` (the
-origin served markdown), `workers-ai`, `browser-rendering`, `not-modified`
-(for `unchanged`) or `firecrawl-parse` (the `parsePdf` tier, whichever parser
-it is). `captureIssue` says why a page is incomplete or missing, when known:
+origin served markdown or plain text), `local-html` (built-in DOM-to-GFM HTML
+converter), `local-csv` (built-in CSV-to-GFM-table converter), `workers-ai`,
+`browser-rendering`, `not-modified` (for `unchanged`) or `firecrawl-parse` (the
+`parsePdf` tier, whichever parser it is). `captureIssue` says why a page is
+incomplete or missing, when known:
 
 | `captureIssue` | |
 |---|---|
@@ -53,6 +70,7 @@ it is). `captureIssue` says why a page is incomplete or missing, when known:
 | `render_incomplete` | The page is an app shell and rendering did not fill it. |
 | `pdf_page_limit_unverified` | The PDF parser read 60 pages or could not say how many; the rest may be missing. |
 | `pdf_extraction_failed` | Workers AI and `parsePdf` both returned nothing. |
+| `cloudflare_not_configured` | A page or document required Browser Rendering or Workers AI, but `cloudflare` credentials were omitted. |
 
 ### Reading a page again
 
@@ -89,7 +107,7 @@ exported, and idempotent, for markdown stored by an older version.
 | Markdown kept | 300,000 characters |
 | Origin request timeout | 30 s, redirects 10 |
 | Pages in flight | `URL_TO_MARKDOWN_PAGE_CONCURRENCY` (80), for the caller's own pool |
-| Per origin host | 16 in flight; 2 (and 2 starts/s) for 15 minutes after a 429 |
+| Per origin host | 16 in flight; 2 (and 2 starts/s) for 15 minutes after a 429 or 401/403 burst |
 | Workers AI | 24 in flight, 12 starts/s |
 | Browser Rendering | 80 in flight, 28 starts/s |
 | Sitemaps | 20 files, 20,000 URLs, 10 MB per file; robots.txt 500 KiB |
@@ -101,7 +119,8 @@ per-host limits.
 
 | Option | Default | |
 |---|---|---|
-| `cloudflare` | required | `{ apiToken, accountId }` |
+| `cloudflare` | none | Optional `{ apiToken, accountId }` for Workers AI and Browser Rendering. Omit when only local HTML/Markdown/CSV conversion is needed. |
+| `htmlConversion` | `'local-first'` | `'local-first'` converts HTML locally with `localHtmlToMarkdown` and escalates only JS shells or blank conversions to Browser Rendering. `'workers-ai-first'` uploads HTML to Workers AI first. |
 | `createLimit` | `createMemoryConcurrencyLimit` | Builds every pool. Pass a shared (Redis) limiter when several processes share the Cloudflare quota. |
 | `onApiError` | none | Workers AI client errors (hanzio `ApiError`) other than 429s. |
 | `reportTimeouts` | `true` | `false` keeps Workers AI timeouts from `onApiError`; the page falls through to the next tier anyway. |
@@ -227,6 +246,10 @@ limiter, and the `fetch` option keeps it off the network.
 ## CLI
 
 ```sh
+# Static HTML, markdown and CSV work without Cloudflare credentials:
+bunx website-to-markdown https://example.com [--no-render]
+
+# Pass Cloudflare credentials to also enable Browser Rendering and binary docs:
 CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=… bunx website-to-markdown https://example.com [--no-render]
 ```
 

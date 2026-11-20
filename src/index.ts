@@ -6,7 +6,8 @@ export {
 export {
 	type ContentKind,
 	classifyContentType,
-	convertibleDocumentType
+	convertibleDocumentType,
+	isCsvContentType
 } from './content-type.js'
 export {
 	CRAWL_SNAPSHOT_NAME_PATTERN,
@@ -16,6 +17,7 @@ export {
 	throughCrawlSnapshot,
 	withCrawlSnapshot
 } from './crawl-snapshot.js'
+export { csvToMarkdownTable } from './csv-to-markdown.js'
 export {
 	type CaptureIssue,
 	createWebsiteToMarkdown,
@@ -23,6 +25,7 @@ export {
 	type FetchOutcome,
 	type FetchPageInput,
 	type FetchSource,
+	type HtmlConversionStrategy,
 	MAX_MARKDOWN_CHARS,
 	type PageBody,
 	type PdfParser,
@@ -37,9 +40,11 @@ export {
 	type CreateConcurrencyLimit,
 	URL_TO_MARKDOWN_PAGE_CONCURRENCY
 } from './limit.js'
+export { localHtmlToMarkdown } from './local-html-to-markdown.js'
 export type { LogAttributes, Logger } from './logger.js'
 export {
 	cleanConvertedMarkdown,
+	decodeCloudflareEmail,
 	htmlImages,
 	htmlLinks,
 	markdownRefs,

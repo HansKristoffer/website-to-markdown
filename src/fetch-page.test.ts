@@ -27,11 +27,14 @@ const { createWebsiteToMarkdown, MAX_MARKDOWN_CHARS } =
 	await import('./fetch-page.js')
 
 /** A fresh converter per test, so no host's pause leaks into the next. */
-function converter() {
+function converter(
+	overrides?: Partial<Parameters<typeof createWebsiteToMarkdown>[0]>
+) {
 	return createWebsiteToMarkdown({
 		cloudflare: { apiToken: 'token', accountId: 'account' },
 		parsePdf,
-		isHostAllowed
+		isHostAllowed,
+		...overrides
 	})
 }
 
@@ -120,11 +123,15 @@ describe('fetchPageAsMarkdown', () => {
 	})
 
 	test('renders a nonempty application shell but retains short business facts on the fast path', async () => {
+		let serveFacts = false
 		mockFetch(() =>
-			html('<html><div id="app"></div><script src="/app.js"></script></html>')
-		)
-		convertHtmlWithWorkersAi.mockResolvedValue(
-			'Loading… Please enable JavaScript'
+			serveFacts
+				? html(
+						'<html><div id="app"></div><script src="/app.js"></script><h1>Opening hours</h1><p>Monday 09:00–17:00</p><p>Tuesday closed</p></html>'
+					)
+				: html(
+						'<html><div id="app"></div><script src="/app.js"></script><p>Loading… Please enable JavaScript</p></html>'
+					)
 		)
 		renderUrlToMarkdown.mockResolvedValue(
 			'# Prices\n\nHaircuts cost 300 kr. Coloring costs 900 kr. Call us to book your appointment.'
@@ -134,13 +141,12 @@ describe('fetchPageAsMarkdown', () => {
 			(await fetchPageAsMarkdown({ url: 'https://example.com/prices' })).source
 		).toBe('browser-rendering')
 		renderUrlToMarkdown.mockClear()
-		convertHtmlWithWorkersAi.mockResolvedValue(
-			'# Opening hours\nMonday 09:00–17:00\nTuesday closed'
-		)
+		serveFacts = true
 		expect(
 			(await fetchPageAsMarkdown({ url: 'https://example.com/hours' })).source
-		).toBe('workers-ai')
+		).toBe('local-html')
 		expect(renderUrlToMarkdown).not.toHaveBeenCalled()
+		expect(convertHtmlWithWorkersAi).not.toHaveBeenCalled()
 	})
 	test('OCR rescues a scanned menu and marks a page-limited parse incomplete', async () => {
 		mockFetch(
@@ -241,21 +247,14 @@ describe('fetchPageAsMarkdown', () => {
 		expect(renderUrlToMarkdown).not.toHaveBeenCalled()
 	})
 
-	test('reads HTML metadata, strips front-matter and absolutizes refs', async () => {
-		mockFetch(() => html(DANISH_PAGE))
-		convertHtmlWithWorkersAi.mockResolvedValue(
-			[
-				'---',
-				'title: Tømrer i Aarhus | S. Bernhard',
-				'description: Vi laver tage og facader.',
-				'---',
-				'',
-				'# Tømrer',
-				'',
-				'[Kontakt](/kontakt) · [Ring](tel:12345678) · [Top](#top)',
-				'',
-				'![Tag](/Admin/Public/GetImage.ashx?image=tag.jpg&amp;width=800)'
-			].join('\n')
+	test('reads HTML metadata and absolutizes refs locally without Workers AI', async () => {
+		mockFetch(() =>
+			html(
+				DANISH_PAGE.replace(
+					'<h1>Tømrer</h1>',
+					'<h1>Tømrer</h1><p><a href="/kontakt">Kontakt</a> · <a href="tel:12345678">Ring</a> · <a href="#top">Top</a></p><img src="/Admin/Public/GetImage.ashx?image=tag.jpg&amp;width=800" alt="Tag">'
+				)
+			)
 		)
 
 		const { fetchPageAsMarkdown } = converter()
@@ -264,7 +263,8 @@ describe('fetchPageAsMarkdown', () => {
 		})
 
 		expect(page.outcome).toBe('ok')
-		expect(page.source).toBe('workers-ai')
+		expect(page.source).toBe('local-html')
+		expect(convertHtmlWithWorkersAi).not.toHaveBeenCalled()
 		expect(page.markdown.startsWith('# Tømrer')).toBe(true)
 		expect(page.title).toBe('Tømrer i Aarhus | S. Bernhard')
 		expect(page.lang).toBe('da')
@@ -283,8 +283,47 @@ describe('fetchPageAsMarkdown', () => {
 		])
 	})
 
+	test('supports workers-ai-first strategy with front-matter stripping', async () => {
+		mockFetch(() => html(DANISH_PAGE))
+		convertHtmlWithWorkersAi.mockResolvedValue(
+			[
+				'---',
+				'title: Tømrer i Aarhus | S. Bernhard',
+				'description: Vi laver tage og facader.',
+				'---',
+				'',
+				'# Tømrer',
+				'',
+				'[Kontakt](/kontakt) · [Ring](tel:12345678) · [Top](#top)',
+				'',
+				'![Tag](/Admin/Public/GetImage.ashx?image=tag.jpg&amp;width=800)'
+			].join('\n')
+		)
+
+		const { fetchPageAsMarkdown } = converter({
+			htmlConversion: 'workers-ai-first'
+		})
+		const page = await fetchPageAsMarkdown({
+			url: 'https://sbernhard.dk/tjenester/tag'
+		})
+
+		expect(page.outcome).toBe('ok')
+		expect(page.source).toBe('workers-ai')
+		expect(page.markdown.startsWith('# Tømrer')).toBe(true)
+		expect(page.links).toEqual(['https://sbernhard.dk/kontakt'])
+		expect(page.images).toEqual([
+			'https://sbernhard.dk/Admin/Public/GetImage.ashx?image=tag.jpg&width=800'
+		])
+	})
+
 	test('falls back to the front-matter title when no HTML tier saw the page', async () => {
-		mockFetch(() => new Response('blocked', { status: 403 }))
+		mockFetch(
+			() =>
+				new Response('blocked', {
+					status: 403,
+					headers: { 'retry-after': '0' }
+				})
+		)
 		renderUrlToMarkdown.mockResolvedValue(
 			'---\ntitle: Priser\ndescription: Vores priser\n---\n\nKonsultation 560,00 kr.'
 		)
@@ -344,11 +383,10 @@ describe('fetchPageAsMarkdown', () => {
 	})
 
 	test('a NUL byte never reaches the page text', async () => {
-		// Workers AI kept one inside an image's alt text on a Wix site, and
-		// Postgres refuses a string holding one: the whole import failed.
-		mockFetch(() => html(DANISH_PAGE))
-		convertHtmlWithWorkersAi.mockResolvedValue(
-			'# Priser\n\n![M\u0000ännchen](https://static.wix/a.png)\n\nBehandlung 55 CHF'
+		mockFetch(() =>
+			html(
+				'<html><body><h1>Priser</h1><img src="https://static.wix/a.png" alt="M\u0000ännchen"><p>Behandlung 55 CHF</p></body></html>'
+			)
 		)
 		const { fetchPageAsMarkdown } = converter()
 		const page = await fetchPageAsMarkdown({ url: 'https://physio.ch/preise' })
@@ -359,9 +397,10 @@ describe('fetchPageAsMarkdown', () => {
 
 	test('page text is composed Unicode, whatever the site sent', async () => {
 		// "Gård" as "a" plus a combining ring: the fact guard read "Broges Ga".
-		mockFetch(() => html(DANISH_PAGE))
-		convertHtmlWithWorkersAi.mockResolvedValue(
-			'# Referencer\n\nHans Broges Ga\u030Ard og Lygtehuset'
+		mockFetch(() =>
+			html(
+				'<html><body><h1>Referencer</h1><p>Hans Broges Ga\u030Ard og Lygtehuset</p></body></html>'
+			)
 		)
 		const { fetchPageAsMarkdown } = converter()
 		const page = await fetchPageAsMarkdown({ url: 'https://tomrer.dk/ref' })
@@ -387,28 +426,41 @@ describe('fetchPageAsMarkdown', () => {
 		expect(renderUrlToMarkdown).not.toHaveBeenCalled()
 	})
 
-	test('converts what a visitor sees, without closed drawers and templates', async () => {
-		mockFetch(() =>
-			html(`<html><body>
-				<main><h1>GoodDay</h1><p>Pink Grapefruit 195 DKK</p></main>
-				<dialog class="theme-drawer__dialog"><template><h2>Your cart is empty</h2></template></dialog>
-				<dialog open><p>Choose your country</p></dialog>
-				<form method="post" action="/da/contact#ContactForm"><label>Telefon</label><label>Kommentar</label><button>Send us a note</button></form>
-				<form action="/cf-api/x"><div class="hide" style="display:none; overflow:hidden;"><label>Url</label><input name="url"></div></form>
-				<div style="display: none"><p>Svar: vi åbner kl. 9.</p></div>
-			</body></html>`)
-		)
+	test('converts what a visitor sees, without closed drawers, templates and dropdowns', async () => {
+		const pageHtml = `<html><body>
+			<main><h1>GoodDay</h1><p>Pink Grapefruit 195 DKK</p></main>
+			<dialog class="theme-drawer__dialog"><template><h2>Your cart is empty</h2></template></dialog>
+			<dialog open><p>Choose your country</p></dialog>
+			<select><option>Afghanistan</option><option>Denmark</option></select>
+			<form method="post" action="/da/contact#ContactForm"><label>Telefon</label><label>Kommentar</label><button>Send us a note</button></form>
+			<form action="/cf-api/x"><div class="hide" style="display:none; overflow:hidden;"><label>Url</label><input name="url"></div></form>
+			<div style="display: none"><p>Svar: vi åbner kl. 9.</p></div>
+		</body></html>`
+		mockFetch(() => html(pageHtml))
+
+		const localPage = await converter().fetchPageAsMarkdown({
+			url: 'https://shop.example/products/goodday'
+		})
+		expect(localPage.source).toBe('local-html')
+		expect(localPage.markdown).toContain('Pink Grapefruit 195 DKK')
+		expect(localPage.markdown).toContain('Choose your country')
+		expect(localPage.markdown).not.toContain('Your cart is empty')
+		expect(localPage.markdown).not.toContain('Afghanistan')
+		expect(localPage.markdown).not.toContain('Kommentar')
+		expect(localPage.markdown).not.toContain('Url')
+		expect(localPage.markdown).toContain('Svar: vi åbner kl. 9.')
+
 		convertHtmlWithWorkersAi.mockResolvedValue(
 			'# GoodDay\n\nPink Grapefruit 195 DKK'
 		)
-		const { fetchPageAsMarkdown } = converter()
-
-		await fetchPageAsMarkdown({ url: 'https://shop.example/products/goodday' })
-
+		await converter({ htmlConversion: 'workers-ai-first' }).fetchPageAsMarkdown(
+			{ url: 'https://shop.example/products/goodday' }
+		)
 		const converted = convertHtmlWithWorkersAi.mock.calls[0]?.[0].html ?? ''
 		expect(converted).toContain('Pink Grapefruit 195 DKK')
 		expect(converted).toContain('Choose your country')
 		expect(converted).not.toContain('Your cart is empty')
+		expect(converted).not.toContain('Afghanistan')
 		expect(converted).not.toContain('Kommentar')
 		expect(converted).not.toContain('<label>Url</label>')
 		expect(converted).toContain('Svar: vi åbner kl. 9.')
@@ -677,18 +729,17 @@ describe('fetchPageAsMarkdown', () => {
 	test('converts a text/html body that does not start with a doctype', async () => {
 		mockFetch(
 			() =>
-				new Response('<!-- built by Umbraco -->\n<div>Åbningstider</div>', {
+				new Response('<!-- built by Umbraco -->\n<h1>Åbningstider</h1>', {
 					status: 200,
 					headers: { 'content-type': 'text/html; charset=utf-8' }
 				})
 		)
-		convertHtmlWithWorkersAi.mockResolvedValue('# Åbningstider')
 		const { fetchPageAsMarkdown } = converter()
 		const page = await fetchPageAsMarkdown({
 			url: 'https://horsenssvaneapotek.dk/'
 		})
 
-		expect(page.source).toBe('workers-ai')
+		expect(page.source).toBe('local-html')
 		expect(page.markdown).toBe('# Åbningstider')
 	})
 
@@ -722,12 +773,14 @@ describe('fetchPageAsMarkdown', () => {
 	})
 
 	test('caps stored markdown', async () => {
-		mockFetch(() => html('<html><body>big</body></html>'))
-		convertHtmlWithWorkersAi.mockResolvedValue('a'.repeat(400_000))
+		mockFetch(() =>
+			html(`<html><body><p>${'a'.repeat(400_000)}</p></body></html>`)
+		)
 		const { fetchPageAsMarkdown } = converter()
 		const page = await fetchPageAsMarkdown({ url: 'https://cerix.dk/priser' })
 
 		expect(page.markdown.length).toBe(MAX_MARKDOWN_CHARS)
+		expect(page.captureIssue).toBe('markdown_limit')
 	})
 
 	test('HTML that cleaning changes is still unchanged on the next read', async () => {
@@ -749,7 +802,13 @@ describe('fetchPageAsMarkdown', () => {
 	})
 
 	test('a bot wall Browser Rendering is rate limited for is transient, not a throw', async () => {
-		mockFetch(() => new Response('denied', { status: 403 }))
+		mockFetch(
+			() =>
+				new Response('denied', {
+					status: 403,
+					headers: { 'retry-after': '0' }
+				})
+		)
 		renderUrlToMarkdown.mockRejectedValue(
 			new CloudflareRateLimitedError('browser-rendering', 4)
 		)
@@ -773,7 +832,13 @@ describe('fetchPageAsMarkdown', () => {
 	})
 
 	test('anything unexpected comes back transient instead of rejecting', async () => {
-		mockFetch(() => new Response('denied', { status: 401 }))
+		mockFetch(
+			() =>
+				new Response('denied', {
+					status: 401,
+					headers: { 'retry-after': '0' }
+				})
+		)
 		renderUrlToMarkdown.mockRejectedValue(new Error('SDK exploded'))
 		const { fetchPageAsMarkdown } = converter()
 		const page = await fetchPageAsMarkdown({ url: 'https://khtf.dk/admin' })
@@ -861,10 +926,11 @@ describe('fetchPageAsMarkdown', () => {
 	})
 
 	test('decodes Cloudflare-obfuscated e-mail in the page', async () => {
-		mockFetch(() => html(DANISH_PAGE))
 		// "a@b.dk" XOR-ed with 0x10.
-		convertHtmlWithWorkersAi.mockResolvedValue(
-			'Mail: [\\[email protected\\]](/cdn-cgi/l/email-protection#107150723e747b)'
+		mockFetch(() =>
+			html(
+				'<html><body><p>Mail: <span class="__cf_email__" data-cfemail="107150723e747b">[email&#160;protected]</span></p></body></html>'
+			)
 		)
 		const { fetchPageAsMarkdown } = converter()
 		const page = await fetchPageAsMarkdown({ url: 'https://lasauna.dk/' })
@@ -909,6 +975,322 @@ describe('fetchPageAsMarkdown', () => {
 			(await fetchPageAsMarkdown({ url: 'ftp://khtf.dk/file' })).outcome
 		).toBe('unsupported')
 		expect(fetchCalls).toEqual([])
+	})
+
+	test('keeps non-empty local markdown when Browser Rendering fails or is rate limited on a shell', async () => {
+		mockFetch(() =>
+			html(
+				'<html><div id="app"></div><script src="/app.js"></script><p>Loading... Acme ApS</p></html>'
+			)
+		)
+		const { fetchPageAsMarkdown } = converter()
+
+		const unavailable = await fetchPageAsMarkdown({
+			url: 'https://acme.dk/app'
+		})
+		expect(unavailable.outcome).toBe('ok')
+		expect(unavailable.source).toBe('local-html')
+		expect(unavailable.markdown).toBe('Loading... Acme ApS')
+		expect(unavailable.captureIssue).toBe('render_incomplete')
+
+		renderUrlToMarkdown.mockRejectedValueOnce(
+			new CloudflareRateLimitedError('browser-rendering', 4)
+		)
+		const rateLimited = await fetchPageAsMarkdown({
+			url: 'https://acme.dk/app'
+		})
+		expect(rateLimited.outcome).toBe('ok')
+		expect(rateLimited.source).toBe('local-html')
+		expect(rateLimited.markdown).toBe('Loading... Acme ApS')
+		expect(rateLimited.captureIssue).toBe('browser_rendering_rate_limited')
+	})
+
+	test('cools down host and retries once on a transient 403 burst before Browser Rendering', async () => {
+		let calls = 0
+		mockFetch(() => {
+			calls++
+			return calls === 1
+				? new Response('waf burst', {
+						status: 403,
+						headers: { 'retry-after': '0' }
+					})
+				: html(
+						'<html><body><h1>Kirohuset</h1><p>Åbningstider 08:00-16:00</p></body></html>'
+					)
+		})
+		const { fetchPageAsMarkdown } = converter()
+
+		const page = await fetchPageAsMarkdown({ url: 'https://kirohuset.dk/' })
+
+		expect(fetchCalls).toHaveLength(2)
+		expect(page.outcome).toBe('ok')
+		expect(page.source).toBe('local-html')
+		expect(page.status).toBe(200)
+		expect(page.markdown).toContain('# Kirohuset')
+		expect(renderUrlToMarkdown).not.toHaveBeenCalled()
+	})
+
+	test('escalates to Browser Rendering only after a 401/403 retry still fails', async () => {
+		mockFetch(
+			() =>
+				new Response('blocked', {
+					status: 403,
+					headers: { 'retry-after': '0' }
+				})
+		)
+		renderUrlToMarkdown.mockResolvedValue('# Rendered Content')
+		const { fetchPageAsMarkdown } = converter()
+
+		const page = await fetchPageAsMarkdown({ url: 'https://wall.dk/priser' })
+
+		expect(fetchCalls).toHaveLength(2)
+		expect(page.outcome).toBe('ok')
+		expect(page.source).toBe('browser-rendering')
+		expect(page.markdown).toBe('# Rendered Content')
+	})
+
+	test('converts crawled text/csv URLs into GFM Markdown tables locally', async () => {
+		mockFetch(
+			() =>
+				new Response('Service,Price,Currency\nDelivery,0,DKK\nRepair,900,DKK', {
+					status: 200,
+					headers: { 'content-type': 'text/csv; charset=utf-8' }
+				})
+		)
+		const { fetchPageAsMarkdown } = converter()
+		const page = await fetchPageAsMarkdown({
+			url: 'https://example.dk/prices.csv'
+		})
+
+		expect(page.outcome).toBe('ok')
+		expect(page.source).toBe('local-csv')
+		expect(page.markdown).toContain('| Service | Price | Currency |')
+		expect(page.markdown).toContain('| Delivery | 0 | DKK |')
+		expect(convertFileWithWorkersAi).not.toHaveBeenCalled()
+	})
+
+	test('produces distinct htmlHash values across htmlConversion strategies', async () => {
+		mockFetch(() => html(DANISH_PAGE))
+		convertHtmlWithWorkersAi.mockResolvedValue('# Tømrer')
+
+		const localPage = await converter({
+			htmlConversion: 'local-first'
+		}).fetchPageAsMarkdown({ url: 'https://sbernhard.dk/' })
+		const aiPage = await converter({
+			htmlConversion: 'workers-ai-first'
+		}).fetchPageAsMarkdown({ url: 'https://sbernhard.dk/' })
+
+		expect(localPage.htmlHash).toBeTruthy()
+		expect(aiPage.htmlHash).toBeTruthy()
+		expect(localPage.htmlHash).not.toBe(aiPage.htmlHash)
+	})
+})
+
+describe('convertDocumentBytes local HTML and CSV support', () => {
+	beforeEach(setUpTiers)
+	afterEach(tearDownTiers)
+
+	test('converts .html and .htm documents locally without Workers AI', async () => {
+		const { convertDocumentBytes } = converter()
+		const body =
+			'<html><body><h1>Priser</h1><p><a href="/book">Book tid</a></p><template>Cart</template></body></html>'
+		const result = await convertDocumentBytes({
+			bytes: new TextEncoder().encode(body).buffer,
+			filename: 'prices.htm',
+			mimeType: 'text/html',
+			extension: 'htm',
+			baseUrl: 'https://clinic.dk/'
+		})
+
+		expect(result.outcome).toBe('ok')
+		expect(result.source).toBe('local-html')
+		expect(result.markdown).toContain('# Priser')
+		expect(result.markdown).toContain('[Book tid](https://clinic.dk/book)')
+		expect(result.markdown).not.toContain('Cart')
+		expect(convertFileWithWorkersAi).not.toHaveBeenCalled()
+	})
+
+	test('converts .csv documents into GFM tables locally and preserves zeros', async () => {
+		const { convertDocumentBytes } = converter()
+		const csv = 'Behandling;Pris;Gebyr\nKlipning;450 kr.;0\nFarvning;895 kr.;0'
+		const result = await convertDocumentBytes({
+			bytes: new TextEncoder().encode(csv).buffer,
+			filename: 'priser.csv',
+			mimeType: 'text/csv',
+			extension: 'csv'
+		})
+
+		expect(result.outcome).toBe('ok')
+		expect(result.source).toBe('local-csv')
+		expect(result.markdown).toBe(
+			[
+				'| Behandling | Pris | Gebyr |',
+				'| --- | --- | --- |',
+				'| Klipning | 450 kr. | 0 |',
+				'| Farvning | 895 kr. | 0 |'
+			].join('\n')
+		)
+		expect(convertFileWithWorkersAi).not.toHaveBeenCalled()
+	})
+
+	test('marks empty HTML or CSV uploads as unsupported', async () => {
+		const { convertDocumentBytes } = converter()
+		const emptyHtml = await convertDocumentBytes({
+			bytes: new TextEncoder().encode(
+				'<html><body><script>1</script></body></html>'
+			).buffer,
+			filename: 'empty.html',
+			mimeType: 'text/html',
+			extension: 'html'
+		})
+		const emptyCsv = await convertDocumentBytes({
+			bytes: new TextEncoder().encode('   \n  ').buffer,
+			filename: 'empty.csv',
+			mimeType: 'text/csv',
+			extension: 'csv'
+		})
+
+		expect(emptyHtml).toEqual({ outcome: 'unsupported', source: null })
+		expect(emptyCsv).toEqual({ outcome: 'unsupported', source: null })
+	})
+})
+
+describe('optional cloudflare credentials', () => {
+	beforeEach(setUpTiers)
+	afterEach(tearDownTiers)
+
+	test('converts static HTML, markdown and CSV locally without cloudflare credentials', async () => {
+		mockFetch((url) => {
+			if (url.endsWith('/prices.csv')) {
+				return new Response('Item,Price\nCoffee,45\nWater,0', {
+					headers: { 'content-type': 'text/csv' }
+				})
+			}
+			return html(DANISH_PAGE)
+		})
+		const localOnly = createWebsiteToMarkdown({ isHostAllowed })
+
+		const htmlPage = await localOnly.fetchPageAsMarkdown({
+			url: 'https://sbernhard.dk/'
+		})
+		expect(htmlPage.outcome).toBe('ok')
+		expect(htmlPage.source).toBe('local-html')
+		expect(htmlPage.markdown).toBe('# Tømrer')
+		expect(htmlPage.title).toBe('Tømrer i Aarhus | S. Bernhard')
+
+		const csvPage = await localOnly.fetchPageAsMarkdown({
+			url: 'https://sbernhard.dk/prices.csv'
+		})
+		expect(csvPage.outcome).toBe('ok')
+		expect(csvPage.source).toBe('local-csv')
+		expect(csvPage.markdown).toContain('| Water | 0 |')
+
+		expect(
+			await localOnly.convertFileWithWorkersAi({
+				body: new ArrayBuffer(4),
+				filename: 'a.pdf',
+				mimeType: 'application/pdf'
+			})
+		).toBeNull()
+		expect(
+			await localOnly.renderUrlToMarkdown('https://sbernhard.dk/')
+		).toBeNull()
+	})
+
+	test('reports clear outcomes and captureIssues when cloudflare tiers are needed but omitted', async () => {
+		const localOnly = createWebsiteToMarkdown({ isHostAllowed })
+
+		// Blank SPA shell needing Browser Rendering
+		mockFetch(() =>
+			html('<html><div id="app"></div><script src="/app.js"></script></html>')
+		)
+		const blankShell = await localOnly.fetchPageAsMarkdown({
+			url: 'https://spa.dk/'
+		})
+		expect(blankShell.outcome).toBe('unsupported')
+		expect(blankShell.captureIssue).toBe('cloudflare_not_configured')
+
+		// Non-empty SPA shell keeps local markdown and flags cloudflare_not_configured
+		mockFetch(() =>
+			html(
+				'<html><div id="app"></div><script src="/app.js"></script><p>Loading... Spa ApS</p></html>'
+			)
+		)
+		const partialShell = await localOnly.fetchPageAsMarkdown({
+			url: 'https://spa.dk/partial'
+		})
+		expect(partialShell.outcome).toBe('ok')
+		expect(partialShell.source).toBe('local-html')
+		expect(partialShell.markdown).toBe('Loading... Spa ApS')
+		expect(partialShell.captureIssue).toBe('cloudflare_not_configured')
+
+		// Persistent 403 bot wall
+		mockFetch(
+			() =>
+				new Response('blocked', {
+					status: 403,
+					headers: { 'retry-after': '0' }
+				})
+		)
+		const blocked = await localOnly.fetchPageAsMarkdown({
+			url: 'https://wall.dk/'
+		})
+		expect(blocked.outcome).toBe('blocked')
+		expect(blocked.captureIssue).toBe('cloudflare_not_configured')
+
+		// Binary document without cloudflare or parsePdf
+		const docx = await localOnly.convertDocumentBytes({
+			bytes: new Uint8Array([80, 75, 3, 4]).buffer,
+			filename: 'terms.docx',
+			mimeType:
+				'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+			extension: 'docx'
+		})
+		expect(docx).toEqual({
+			outcome: 'unsupported',
+			source: null,
+			captureIssue: 'cloudflare_not_configured'
+		})
+
+		const pdfNoParser = await localOnly.convertDocumentBytes({
+			bytes: new Uint8Array([37, 80, 68, 70]).buffer,
+			filename: 'menu.pdf',
+			mimeType: 'application/pdf',
+			extension: 'pdf'
+		})
+		expect(pdfNoParser).toEqual({
+			outcome: 'unsupported',
+			source: null,
+			captureIssue: 'cloudflare_not_configured'
+		})
+
+		// PDF WITH parsePdf still succeeds without cloudflare
+		parsePdf.mockResolvedValue({ markdown: '# Menu\nSoup 75 kr.', numPages: 1 })
+		const withPdfOnly = createWebsiteToMarkdown({ isHostAllowed, parsePdf })
+		const pdfParsed = await withPdfOnly.convertDocumentBytes({
+			bytes: new Uint8Array([37, 80, 68, 70]).buffer,
+			filename: 'menu.pdf',
+			mimeType: 'application/pdf',
+			extension: 'pdf'
+		})
+		expect(pdfParsed).toEqual({
+			outcome: 'ok',
+			source: 'firecrawl-parse',
+			markdown: '# Menu\nSoup 75 kr.',
+			captureIssue: null
+		})
+
+		// Explicit workers-ai-first without cloudflare
+		mockFetch(() => html(DANISH_PAGE))
+		const workersAiNoCreds = createWebsiteToMarkdown({
+			htmlConversion: 'workers-ai-first',
+			isHostAllowed
+		})
+		const aiResult = await workersAiNoCreds.fetchPageAsMarkdown({
+			url: 'https://sbernhard.dk/'
+		})
+		expect(aiResult.outcome).toBe('unsupported')
+		expect(aiResult.captureIssue).toBe('cloudflare_not_configured')
 	})
 })
 

@@ -27,6 +27,8 @@ export type FetchOutcome = (typeof FETCH_OUTCOMES)[number]
 /** Every `FetchedPage.source`. `firecrawl-parse` is the `parsePdf` tier, whatever parser it is. */
 export const FETCH_SOURCES = [
 	'content-negotiation',
+	'local-html',
+	'local-csv',
 	'workers-ai',
 	'browser-rendering',
 	'not-modified',
@@ -43,6 +45,7 @@ export const CAPTURE_ISSUES = [
 	'browser_rendering_rate_limited',
 	'render_incomplete',
 	'pdf_page_limit_unverified',
-	'pdf_extraction_failed'
+	'pdf_extraction_failed',
+	'cloudflare_not_configured'
 ] as const
 export type CaptureIssue = (typeof CAPTURE_ISSUES)[number]
